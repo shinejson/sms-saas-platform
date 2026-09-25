@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 export default function Home() {
   const [showRegister, setShowRegister] = useState(false);
@@ -7,6 +7,13 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [hasActiveSession, setHasActiveSession] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && localStorage.getItem("sms_token")) {
+      setHasActiveSession(true);
+    }
+  }, []);
 
   const [formData, setFormData] = useState({
     schoolName: "",
@@ -35,11 +42,20 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(formData),
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Server returned unexpected response (${res.status}): Please check backend server.`);
+      }
       if (!res.ok) throw new Error(data.error || "Registration failed");
-      setMsg(`Success! School "${data.tenant.name}" created on subdomain "${data.tenant.subdomain}". Redirecting...`);
+      setMsg(`Success! School "${data.tenant.name}" created on subdomain "${data.tenant.subdomain}". Redirecting to dashboard...`);
       localStorage.setItem("sms_token", data.token);
       localStorage.setItem("sms_tenant", JSON.stringify(data.tenant));
+      setTimeout(() => {
+        window.location.href = "/dashboard";
+      }, 700);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -58,12 +74,21 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(loginData),
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Server returned unexpected response (${res.status}): Please check backend server.`);
+      }
       if (!res.ok) throw new Error(data.error || "Login failed");
-      setMsg(`Welcome back, ${data.user.fullName}! Redirecting...`);
+      setMsg(`Welcome back, ${data.user.fullName}! Redirecting to dashboard...`);
       localStorage.setItem("sms_token", data.token);
       localStorage.setItem("sms_tenant", JSON.stringify(data.tenant));
       localStorage.setItem("sms_user", JSON.stringify(data.user));
+      setTimeout(() => {
+        window.location.href = "/dashboard";
+      }, 700);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -89,6 +114,14 @@ export default function Home() {
           </nav>
 
           <div className="flex items-center gap-3">
+            {hasActiveSession && (
+              <a
+                href="/dashboard"
+                className="px-4 py-2 text-sm font-bold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm transition flex items-center gap-1.5"
+              >
+                <span>🚀</span> Go to Dashboard
+              </a>
+            )}
             <button
               onClick={() => { setShowLogin(true); setShowRegister(false); setError(""); setMsg(""); }}
               className="px-4 py-2 text-sm font-semibold text-slate-700 hover:text-blue-600"
@@ -385,14 +418,26 @@ export default function Home() {
               >
                 {loading ? "Signing in..." : "Sign In"}
               </button>
+
+              <div className="pt-2 text-center text-xs text-slate-500 border-t border-slate-100 mt-2">
+                Are you the Platform Owner?{" "}
+                <a href="/admin" className="font-bold text-indigo-600 hover:underline">
+                  Super Admin Portal →
+                </a>
+              </div>
             </form>
           </div>
         </div>
       )}
 
       {/* Footer */}
-      <footer className="bg-slate-100 border-t border-slate-200 py-8 text-center text-xs text-slate-500">
+      <footer className="bg-slate-100 border-t border-slate-200 py-8 text-center text-xs text-slate-500 space-y-2">
         <p>© 2026 SMS Global Cloud SaaS. Multi-tenant School Management System.</p>
+        <div className="flex items-center justify-center gap-4 text-xs font-semibold text-slate-600">
+          <a href="/admin" className="text-indigo-600 hover:text-indigo-800 transition flex items-center gap-1.5">
+            <span>👑</span> Platform Owner & Super Admin Portal
+          </a>
+        </div>
       </footer>
     </div>
   );
