@@ -87,7 +87,7 @@ export default function Home() {
       localStorage.setItem("sms_tenant", JSON.stringify(data.tenant));
       localStorage.setItem("sms_user", JSON.stringify(data.user));
       setTimeout(() => {
-        window.location.href = "/dashboard";
+        window.location.href = data.user.role === 'SUPER_ADMIN' ? '/admin' : '/dashboard';
       }, 700);
     } catch (err: any) {
       setError(err.message);

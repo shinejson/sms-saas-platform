@@ -25,13 +25,23 @@ export async function POST(req: NextRequest) {
       tenantId = tenant.id;
     }
 
-    const user = await prisma.user.findFirst({
+    let user = await prisma.user.findFirst({
       where: {
         email: email.toLowerCase().trim(),
         ...(tenantId ? { tenantId } : {}),
       },
       include: { tenant: true },
     });
+
+    // If not found with tenantId (e.g. Super Admin logging in or subdomain mismatch), search globally by email
+    if (!user) {
+      user = await prisma.user.findFirst({
+        where: {
+          email: email.toLowerCase().trim(),
+        },
+        include: { tenant: true },
+      });
+    }
 
     if (!user) {
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
