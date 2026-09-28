@@ -72,6 +72,13 @@ model Tenant {
   attendanceRecords Attendance[]
   auditLogs         AuditLog[]
   subscriptions     Subscription[]
+  enrollments       Enrollment[]
+  teachers          Teacher[]
+  performances      Performance[]
+  parents           Parent[]
+  settings          Setting[]
+  permissions       Permission[]
+  billings          Billing[]
 
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
@@ -115,6 +122,7 @@ model User {
   taughtSubjects   Subject[]     @relation("SubjectInstructor")
   recordedPayments Payment[]     @relation("PaymentRecorder")
   auditLogs        AuditLog[]
+  parentProfiles   Parent[]      @relation("ParentUser")
 
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
@@ -156,6 +164,7 @@ model Class {
 
   students       Student[]
   attendance     Attendance[]
+  teachers       Teacher[]
 
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
@@ -176,6 +185,7 @@ model Subject {
   credits      Int           @default(1)
   semester     String?
   status       AccountStatus @default(ACTIVE)
+  enrollments  Enrollment[]
 
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
@@ -204,8 +214,11 @@ model Student {
   photoUrl      String?
   status        AccountStatus @default(ACTIVE)
 
-  invoices      Invoice[]
-  attendance    Attendance[]
+  invoices       Invoice[]
+  attendance     Attendance[]
+  enrollments    Enrollment[]
+  performances   Performance[]
+  parentMappings Parent[]
 
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
@@ -240,19 +253,41 @@ model Attendance {
   @@index([tenantId, academicYearId, term])
 }
 
+model Billing {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  billingId   String
+  item        String
+  amount      Decimal  @default(0.00) @db.Decimal(10, 2)
+  status      String   @default("Active")
+  description String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([tenantId, billingId])
+  @@index([tenantId])
+}
+
 model BillingCategory {
   id            String   @id @default(cuid())
   tenantId      String
   tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   
+  categoryId    String?
   name          String
-  description   String?
+  academicYear  String?
+  term          String?
+  items         String?
+  totalAmount   Decimal  @default(0.00) @db.Decimal(10, 2)
   defaultAmount Decimal  @default(0.00) @db.Decimal(10, 2)
+  description   String?
 
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  @@unique([tenantId, name])
   @@index([tenantId])
 }
 
@@ -326,4 +361,139 @@ model AuditLog {
 
   @@index([tenantId, entity])
   @@index([tenantId, createdAt])
+}
+
+model Enrollment {
+  id             String        @id @default(cuid())
+  tenantId       String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  enrollmentId   String
+  studentId      String
+  student        Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subjectId      String?
+  subject        Subject?      @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  courseCode     String?
+  courseName     String?
+  
+  enrollmentDate DateTime?     @default(now())
+  grade          String?
+  status         String        @default("Active")
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([tenantId, enrollmentId])
+  @@index([tenantId, studentId])
+  @@index([tenantId, subjectId])
+}
+
+model Teacher {
+  id             String        @id @default(cuid())
+  tenantId       String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  teacherId      String
+  firstName      String
+  lastName       String
+  phone          String?
+  email          String?
+  classId        String?
+  class          Class?        @relation(fields: [classId], references: [id], onDelete: SetNull)
+  className      String?
+  academicYear   String?
+  status         AccountStatus @default(ACTIVE)
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([tenantId, teacherId])
+  @@index([tenantId])
+}
+
+model Performance {
+  id             String        @id @default(cuid())
+  tenantId       String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  performanceId  String?
+  studentId      String
+  student        Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  studentName    String?
+  studentClass   String?
+  term           String
+  academicYear   String
+  course         String
+  
+  classScore     Decimal       @default(0.00) @db.Decimal(5, 2)
+  examScore100   Decimal       @default(0.00) @db.Decimal(5, 2)
+  examScore60    Decimal       @default(0.00) @db.Decimal(5, 2)
+  total          Decimal       @default(0.00) @db.Decimal(5, 2)
+  grade          String?
+  rank           String?
+  remarks        String?
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([tenantId, studentId])
+  @@index([tenantId, academicYear, term])
+  @@index([tenantId, studentClass])
+}
+
+model Parent {
+  id             String        @id @default(cuid())
+  tenantId       String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  mappingId      String
+  parentUserId   String?
+  parentUser     User?         @relation("ParentUser", fields: [parentUserId], references: [id], onDelete: SetNull)
+  parentName     String
+  studentId      String
+  student        Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  relationship   String?
+  isPrimary      Boolean       @default(false)
+  billing        String?
+  phone          String?
+  email          String?
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([tenantId, mappingId])
+  @@index([tenantId, studentId])
+  @@index([tenantId, parentUserId])
+}
+
+model Setting {
+  id             String        @id @default(cuid())
+  tenantId       String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  param          String
+  value          String        @db.Text
+  category       String?       @default("General")
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([tenantId, param])
+  @@index([tenantId])
+}
+
+model Permission {
+  id             String        @id @default(cuid())
+  tenantId       String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  role           String
+  accessLevel    String
+  actions        String
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([tenantId, role])
+  @@index([tenantId])
 }
