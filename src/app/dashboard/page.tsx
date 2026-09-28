@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useState, useEffect } from 'react';
 
@@ -31,6 +31,37 @@ interface Student {
   status: string;
   createdAt: string;
   class?: { name: string };
+}
+
+interface Teacher {
+  id: string;
+  teacherId: string;
+  firstName: string;
+  lastName: string;
+  className?: string;
+  academicYear?: string;
+  status: string;
+  createdAt: string;
+}
+
+interface Subject {
+  id: string;
+  code?: string | null;
+  name: string;
+  instructorName?: string | null;
+  credits: number;
+  semester?: string | null;
+  status: string;
+  createdAt: string;
+}
+
+interface AcademicYearRecord {
+  id: string;
+  year: string;
+  status: string;
+  currentTerm: string;
+  createdAt: string;
+  _count?: { classes: number; invoices: number; attendance: number };
 }
 
 interface BillingItem {
@@ -312,6 +343,66 @@ export default function Dashboard() {
   const [migrationLoading, setMigrationLoading] = useState(false);
   const [migrationResult, setMigrationResult] = useState<string | null>(null);
 
+  // Teachers CRUD state
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [teacherSearchQuery, setTeacherSearchQuery] = useState('');
+  const [teacherLoading, setTeacherLoading] = useState(false);
+  const [teachersFetched, setTeachersFetched] = useState(false);
+  const [showTeacherModal, setShowTeacherModal] = useState(false);
+  const [editingTeacher, setEditingTeacher] = useState<Teacher | null>(null);
+  const [teacherForm, setTeacherForm] = useState({
+    firstName: '',
+    lastName: '',
+    className: '',
+    academicYear: '',
+  });
+  const [teacherFormLoading, setTeacherFormLoading] = useState(false);
+  const [teacherFormError, setTeacherFormError] = useState('');
+  const [showDeleteTeacherModal, setShowDeleteTeacherModal] = useState(false);
+  const [deletingTeacher, setDeletingTeacher] = useState<Teacher | null>(null);
+  const [deleteTeacherLoading, setDeleteTeacherLoading] = useState(false);
+
+  // Subjects CRUD state
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [subjectSearchQuery, setSubjectSearchQuery] = useState('');
+  const [subjectStatusFilter, setSubjectStatusFilter] = useState('All Statuses');
+  const [subjectLoading, setSubjectLoading] = useState(false);
+  const [subjectsFetched, setSubjectsFetched] = useState(false);
+  const [showSubjectModal, setShowSubjectModal] = useState(false);
+  const [editingSubject, setEditingSubject] = useState<Subject | null>(null);
+  const [subjectForm, setSubjectForm] = useState({
+    name: '',
+    instructor: '',
+    credits: '1',
+    semester: '',
+    status: 'Active',
+  });
+  const [subjectFormLoading, setSubjectFormLoading] = useState(false);
+  const [subjectFormError, setSubjectFormError] = useState('');
+  const [showDeleteSubjectModal, setShowDeleteSubjectModal] = useState(false);
+  const [deletingSubject, setDeletingSubject] = useState<Subject | null>(null);
+  const [deleteSubjectLoading, setDeleteSubjectLoading] = useState(false);
+  const [subjectNotice, setSubjectNotice] = useState('');
+
+  // Academic Years CRUD state
+  const [academicYears, setAcademicYears] = useState<AcademicYearRecord[]>([]);
+  const [yearSearchQuery, setYearSearchQuery] = useState('');
+  const [yearLoading, setYearLoading] = useState(false);
+  const [yearsFetched, setYearsFetched] = useState(false);
+  const [showYearModal, setShowYearModal] = useState(false);
+  const [editingYear, setEditingYear] = useState<AcademicYearRecord | null>(null);
+  const [yearForm, setYearForm] = useState({
+    year: '',
+    status: 'Active',
+    currentTerm: 'Term 1',
+  });
+  const [yearFormLoading, setYearFormLoading] = useState(false);
+  const [yearFormError, setYearFormError] = useState('');
+  const [showDeleteYearModal, setShowDeleteYearModal] = useState(false);
+  const [deletingYear, setDeletingYear] = useState<AcademicYearRecord | null>(null);
+  const [deleteYearLoading, setDeleteYearLoading] = useState(false);
+  const [yearNotice, setYearNotice] = useState('');
+
   // On mount: authenticate from localStorage
   useEffect(() => {
     const savedToken = localStorage.getItem('sms_token');
@@ -518,6 +609,357 @@ export default function Dashboard() {
     setSelectedDate(date);
     fetchDashboardData(selectedYear, selectedTerm, date);
   };
+
+  // ---- TEACHERS CRUD ----
+
+  const fetchTeachers = async () => {
+    if (!token) return;
+    setTeacherLoading(true);
+    try {
+      const res = await fetch('/api/teachers', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setTeachers(data.teachers || []);
+        setTeachersFetched(true);
+      }
+    } catch (e) {
+      console.error('Failed to load teachers:', e);
+    } finally {
+      setTeacherLoading(false);
+    }
+  };
+
+  // Lazy-load teachers when the tab becomes active
+  useEffect(() => {
+    if (activeTab === 'teachers' && token && !teachersFetched) {
+      fetchTeachers();
+    }
+  }, [activeTab, token]);
+
+  const openAddTeacherModal = () => {
+    setEditingTeacher(null);
+    setTeacherForm({ firstName: '', lastName: '', className: '', academicYear: '' });
+    setTeacherFormError('');
+    setShowTeacherModal(true);
+  };
+
+  const openEditTeacherModal = (teacher: Teacher) => {
+    setEditingTeacher(teacher);
+    setTeacherForm({
+      firstName: teacher.firstName,
+      lastName: teacher.lastName,
+      className: teacher.className || '',
+      academicYear: teacher.academicYear || '',
+    });
+    setTeacherFormError('');
+    setShowTeacherModal(true);
+  };
+
+  const handleTeacherFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTeacherFormLoading(true);
+    setTeacherFormError('');
+    try {
+      const url = editingTeacher ? `/api/teachers/${editingTeacher.id}` : '/api/teachers';
+      const method = editingTeacher ? 'PUT' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(teacherForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save teacher.');
+      setShowTeacherModal(false);
+      setTeachersFetched(false); // force refresh
+      fetchTeachers();
+    } catch (err: any) {
+      setTeacherFormError(err.message);
+    } finally {
+      setTeacherFormLoading(false);
+    }
+  };
+
+  const openDeleteTeacherModal = (teacher: Teacher) => {
+    setDeletingTeacher(teacher);
+    setShowDeleteTeacherModal(true);
+  };
+
+  const handleDeleteTeacher = async () => {
+    if (!deletingTeacher) return;
+    setDeleteTeacherLoading(true);
+    try {
+      const res = await fetch(`/api/teachers/${deletingTeacher.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setShowDeleteTeacherModal(false);
+        setDeletingTeacher(null);
+        setTeachersFetched(false);
+        fetchTeachers();
+      }
+    } catch (err) {
+      console.error('Failed to delete teacher:', err);
+    } finally {
+      setDeleteTeacherLoading(false);
+    }
+  };
+
+  const filteredTeachers = teachers.filter((t) => {
+    const q = teacherSearchQuery.toLowerCase();
+    if (!q) return true;
+    return (
+      t.teacherId.toLowerCase().includes(q) ||
+      t.firstName.toLowerCase().includes(q) ||
+      t.lastName.toLowerCase().includes(q) ||
+      (t.className || '').toLowerCase().includes(q) ||
+      (t.academicYear || '').toLowerCase().includes(q)
+    );
+  });
+
+  // ---- SUBJECTS CRUD ----
+
+  const fetchSubjects = async () => {
+    if (!token) return;
+    setSubjectLoading(true);
+    try {
+      const res = await fetch('/api/subjects', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSubjects(data.subjects || []);
+        setSubjectsFetched(true);
+      }
+    } catch (e) {
+      console.error('Failed to load subjects:', e);
+    } finally {
+      setSubjectLoading(false);
+    }
+  };
+
+  // Lazy-load subjects when the tab becomes active
+  useEffect(() => {
+    if (activeTab === 'subjects' && token && !subjectsFetched) {
+      fetchSubjects();
+    }
+  }, [activeTab, token]);
+
+  const openAddSubjectModal = () => {
+    setEditingSubject(null);
+    setSubjectForm({ name: '', instructor: '', credits: '1', semester: '', status: 'Active' });
+    setSubjectFormError('');
+    setShowSubjectModal(true);
+  };
+
+  const openEditSubjectModal = (subject: Subject) => {
+    setEditingSubject(subject);
+    setSubjectForm({
+      name: subject.name,
+      instructor: subject.instructorName || '',
+      credits: String(subject.credits ?? 1),
+      semester: subject.semester || '',
+      status: subject.status === 'INACTIVE' ? 'Inactive' : 'Active',
+    });
+    setSubjectFormError('');
+    setShowSubjectModal(true);
+  };
+
+  const handleSubjectFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubjectFormLoading(true);
+    setSubjectFormError('');
+    try {
+      const url = editingSubject ? `/api/subjects/${editingSubject.id}` : '/api/subjects';
+      const method = editingSubject ? 'PUT' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(subjectForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save subject.');
+      setShowSubjectModal(false);
+      setSubjectNotice(data.message || 'Subject saved successfully.');
+      setSubjectsFetched(false); // force refresh
+      fetchSubjects();
+      fetchDashboardData();
+    } catch (err: any) {
+      setSubjectFormError(err.message);
+    } finally {
+      setSubjectFormLoading(false);
+    }
+  };
+
+  const openDeleteSubjectModal = (subject: Subject) => {
+    setDeletingSubject(subject);
+    setShowDeleteSubjectModal(true);
+  };
+
+  const handleDeleteSubject = async () => {
+    if (!deletingSubject) return;
+    setDeleteSubjectLoading(true);
+    try {
+      const res = await fetch(`/api/subjects/${deletingSubject.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSubjectNotice(data.error || 'Failed to delete subject.');
+        return;
+      }
+      setShowDeleteSubjectModal(false);
+      setDeletingSubject(null);
+      setSubjectNotice(data.message || 'Subject deleted successfully!');
+      setSubjectsFetched(false);
+      fetchSubjects();
+      fetchDashboardData();
+    } catch (err) {
+      console.error('Failed to delete subject:', err);
+    } finally {
+      setDeleteSubjectLoading(false);
+    }
+  };
+
+  const filteredSubjects = subjects.filter((s) => {
+    if (subjectStatusFilter !== 'All Statuses') {
+      const wanted = subjectStatusFilter === 'Inactive' ? 'INACTIVE' : 'ACTIVE';
+      if (s.status !== wanted) return false;
+    }
+    const q = subjectSearchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      s.name.toLowerCase().includes(q) ||
+      (s.code || '').toLowerCase().includes(q) ||
+      (s.instructorName || '').toLowerCase().includes(q) ||
+      (s.semester || '').toLowerCase().includes(q)
+    );
+  });
+
+  // ---- ACADEMIC YEARS CRUD ----
+
+  const fetchAcademicYears = async () => {
+    if (!token) return;
+    setYearLoading(true);
+    try {
+      const res = await fetch('/api/academic-years', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAcademicYears(data.academicYears || []);
+        setYearsFetched(true);
+      }
+    } catch (e) {
+      console.error('Failed to load academic years:', e);
+    } finally {
+      setYearLoading(false);
+    }
+  };
+
+  // Lazy-load academic years when the tab becomes active
+  useEffect(() => {
+    if (activeTab === 'academic-years' && token && !yearsFetched) {
+      fetchAcademicYears();
+    }
+  }, [activeTab, token]);
+
+  const openAddYearModal = () => {
+    setEditingYear(null);
+    setYearForm({
+      year: '',
+      status: 'Active',
+      currentTerm: stats?.currentTerm || 'Term 1',
+    });
+    setYearFormError('');
+    setShowYearModal(true);
+  };
+
+  const openEditYearModal = (year: AcademicYearRecord) => {
+    setEditingYear(year);
+    setYearForm({
+      year: year.year,
+      status: year.status === 'Inactive' ? 'Inactive' : 'Active',
+      currentTerm: year.currentTerm || 'Term 1',
+    });
+    setYearFormError('');
+    setShowYearModal(true);
+  };
+
+  const handleYearFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setYearFormLoading(true);
+    setYearFormError('');
+    try {
+      const url = editingYear ? `/api/academic-years/${editingYear.id}` : '/api/academic-years';
+      const method = editingYear ? 'PUT' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(yearForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save academic year.');
+      setShowYearModal(false);
+      setYearNotice(data.message || 'Academic year saved successfully.');
+      setYearsFetched(false); // force refresh
+      fetchAcademicYears();
+      fetchDashboardData();
+    } catch (err: any) {
+      setYearFormError(err.message);
+    } finally {
+      setYearFormLoading(false);
+    }
+  };
+
+  const openDeleteYearModal = (year: AcademicYearRecord) => {
+    setDeletingYear(year);
+    setShowDeleteYearModal(true);
+  };
+
+  const handleDeleteYear = async () => {
+    if (!deletingYear) return;
+    setDeleteYearLoading(true);
+    try {
+      const res = await fetch(`/api/academic-years/${deletingYear.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setYearNotice(data.error || 'Failed to delete academic year.');
+        return;
+      }
+      setShowDeleteYearModal(false);
+      setDeletingYear(null);
+      setYearNotice(data.message || 'Academic year deleted successfully!');
+      setYearsFetched(false);
+      fetchAcademicYears();
+      fetchDashboardData();
+    } catch (err) {
+      console.error('Failed to delete academic year:', err);
+    } finally {
+      setDeleteYearLoading(false);
+    }
+  };
+
+  const filteredAcademicYears = academicYears.filter((y) => {
+    const q = yearSearchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return y.year.toLowerCase().includes(q);
+  });
 
   // SVG Chart 1: Payment Status by Class (Paid in Green #10b981 vs Unpaid in Red #ef4444)
   const renderPaymentStatusChart = () => {
@@ -2387,36 +2829,244 @@ export default function Dashboard() {
           {/* TAB: TEACHERS */}
           {activeTab === 'teachers' && (
             <div className="space-y-6">
+              {/* Header */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <h1 className="text-2xl font-bold text-slate-900">Teachers & Faculty Directory</h1>
-                  <p className="text-sm text-slate-500">Manage teaching staff, assigned courses, and contact information for {tenant?.name}.</p>
+                  <h1 className="text-2xl font-bold text-slate-900">Teachers &amp; Faculty Directory</h1>
+                  <p className="text-sm text-slate-500">Manage teaching staff, assigned classes, and academic year for {tenant?.name}.</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <button onClick={() => setActiveTab('migration')} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition flex items-center gap-2 shadow-sm">
-                    <span>🔄</span> Import Teachers from Google Sheets
+                  <button
+                    onClick={() => setActiveTab('migration')}
+                    className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs hover:bg-slate-200 transition flex items-center gap-2"
+                  >
+                    <span>🔄</span> Import from Sheets
+                  </button>
+                  <button
+                    onClick={openAddTeacherModal}
+                    className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
+                  >
+                    <span>➕</span> Add Teacher
                   </button>
                 </div>
               </div>
 
-              <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-4 shadow-sm">
-                <div className="w-14 h-14 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center mx-auto text-2xl shadow-inner">
-                  👨‍🏫
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-800 text-lg">Staff & Teachers Management</h3>
-                  <p className="text-xs text-slate-500 max-w-lg mx-auto mt-1">
-                    Your Neon PostgreSQL table <code className="bg-slate-100 text-blue-700 px-1.5 py-0.5 rounded font-mono font-bold">Teacher</code> is active and multi-tenant isolated. You can sync teaching staff records from your Google Sheets "Teachers" tab or assign classes.
-                  </p>
-                </div>
-                <div className="flex justify-center gap-3 pt-2">
-                  <button onClick={() => setActiveTab('migration')} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition">
-                    Sync Sheets Data
-                  </button>
-                </div>
+              {/* Search Bar */}
+              <div className="flex items-center gap-4 bg-white p-4 rounded-xl border border-slate-200">
+                <input
+                  type="text"
+                  placeholder="Search by name, ID, or class..."
+                  value={teacherSearchQuery}
+                  onChange={(e) => setTeacherSearchQuery(e.target.value)}
+                  className="flex-1 px-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <span className="text-xs text-slate-500 whitespace-nowrap">
+                  {teacherLoading ? 'Loading...' : `Showing ${filteredTeachers.length} of ${teachers.length}`}
+                </span>
               </div>
+
+              {/* Teachers Table */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                {teacherLoading ? (
+                  <div className="py-16 text-center text-slate-400 text-sm">Loading teachers...</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-50 text-slate-600 text-xs uppercase border-b border-slate-200">
+                        <tr>
+                          <th className="py-3 px-4">Teacher ID</th>
+                          <th className="py-3 px-4">First Name</th>
+                          <th className="py-3 px-4">Last Name</th>
+                          <th className="py-3 px-4">Class</th>
+                          <th className="py-3 px-4">Academic Year</th>
+                          <th className="py-3 px-4 text-center">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredTeachers.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="py-12 text-center text-slate-500 text-sm">
+                              {teachers.length === 0 ? (
+                                <div className="space-y-3">
+                                  <div className="text-3xl">👨‍🏫</div>
+                                  <p className="font-semibold text-slate-700">No teachers added yet.</p>
+                                  <p className="text-xs text-slate-400">Click &ldquo;Add Teacher&rdquo; to get started, or import from Google Sheets.</p>
+                                  <button
+                                    onClick={openAddTeacherModal}
+                                    className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                                  >
+                                    + Add First Teacher
+                                  </button>
+                                </div>
+                              ) : (
+                                'No teachers match your search.'
+                              )}
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredTeachers.map((t) => (
+                            <tr key={t.id} className="hover:bg-slate-50/50">
+                              <td className="py-3 px-4 font-mono font-semibold text-blue-600">{t.teacherId}</td>
+                              <td className="py-3 px-4 font-bold text-slate-900">{t.firstName}</td>
+                              <td className="py-3 px-4 text-slate-700">{t.lastName}</td>
+                              <td className="py-3 px-4 text-slate-600">{t.className || '—'}</td>
+                              <td className="py-3 px-4 text-slate-600">{t.academicYear || '—'}</td>
+                              <td className="py-3 px-4 text-center">
+                                <button
+                                  onClick={() => openEditTeacherModal(t)}
+                                  className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                                  title="Edit teacher"
+                                >
+                                  ✏️
+                                </button>
+                                <button
+                                  onClick={() => openDeleteTeacherModal(t)}
+                                  className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
+                                  title="Delete teacher"
+                                >
+                                  🗑️
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* ADD / EDIT TEACHER MODAL */}
+              {showTeacherModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
+                  <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                      <h3 className="text-base font-bold text-slate-900">
+                        {editingTeacher ? 'Edit Teacher' : 'Add New Teacher'}
+                      </h3>
+                      <button
+                        onClick={() => setShowTeacherModal(false)}
+                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                    <form onSubmit={handleTeacherFormSubmit}>
+                      <div className="px-6 py-5 space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">First Name</label>
+                            <input
+                              type="text"
+                              required
+                              value={teacherForm.firstName}
+                              onChange={(e) => setTeacherForm({ ...teacherForm, firstName: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              placeholder="e.g. John"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Last Name</label>
+                            <input
+                              type="text"
+                              required
+                              value={teacherForm.lastName}
+                              onChange={(e) => setTeacherForm({ ...teacherForm, lastName: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              placeholder="e.g. Mensah"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Assigned Class</label>
+                            <input
+                              type="text"
+                              value={teacherForm.className}
+                              onChange={(e) => setTeacherForm({ ...teacherForm, className: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              placeholder="e.g. Class 4"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Academic Year</label>
+                            <input
+                              type="text"
+                              value={teacherForm.academicYear}
+                              onChange={(e) => setTeacherForm({ ...teacherForm, academicYear: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              placeholder={stats?.activeYear || 'e.g. 2025/2026'}
+                            />
+                          </div>
+                        </div>
+                        {teacherFormError && (
+                          <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{teacherFormError}</p>
+                        )}
+                      </div>
+                      <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setShowTeacherModal(false)}
+                          className="px-4 py-2 rounded-xl bg-slate-200 text-slate-600 font-semibold text-sm hover:bg-slate-300 transition"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={teacherFormLoading}
+                          className="px-5 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition disabled:opacity-50"
+                        >
+                          {teacherFormLoading
+                            ? (editingTeacher ? 'Updating...' : 'Saving...')
+                            : (editingTeacher ? 'Update Teacher' : 'Save Teacher')}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {/* DELETE CONFIRMATION MODAL */}
+              {showDeleteTeacherModal && deletingTeacher && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
+                  <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                      <h3 className="text-base font-bold text-slate-900">Delete Teacher</h3>
+                      <button
+                        onClick={() => setShowDeleteTeacherModal(false)}
+                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                    <div className="px-6 py-5">
+                      <p className="text-sm text-slate-600 leading-relaxed">
+                        Are you sure you want to delete teacher{' '}
+                        <strong className="text-slate-900">{deletingTeacher.firstName} {deletingTeacher.lastName}</strong>?
+                      </p>
+                      <p className="text-xs text-red-500 mt-2">This action cannot be undone.</p>
+                    </div>
+                    <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                      <button
+                        onClick={() => setShowDeleteTeacherModal(false)}
+                        className="px-4 py-2 rounded-xl bg-slate-200 text-slate-600 font-semibold text-sm hover:bg-slate-300 transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleDeleteTeacher}
+                        disabled={deleteTeacherLoading}
+                        className="px-5 py-2 rounded-xl bg-red-500 text-white font-semibold text-sm hover:bg-red-600 transition disabled:opacity-50"
+                      >
+                        {deleteTeacherLoading ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
+
 
           {/* TAB: USERS */}
           {activeTab === 'users' && (
@@ -2506,32 +3156,306 @@ export default function Dashboard() {
           {/* TAB: SUBJECTS */}
           {activeTab === 'subjects' && (
             <div className="space-y-6">
+              {/* Header */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <h1 className="text-2xl font-bold text-slate-900">Subjects & Curriculum</h1>
+                  <h1 className="text-2xl font-bold text-slate-900">Subjects &amp; Curriculum</h1>
                   <p className="text-sm text-slate-500">Manage courses and instructional subjects taught across grade levels.</p>
                 </div>
-                <button onClick={() => setActiveTab('classes')} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition">
-                  View Classes & Subjects
-                </button>
-              </div>
-
-              <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-4 shadow-sm">
-                <div className="w-14 h-14 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center mx-auto text-2xl shadow-inner">
-                  📚
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-800 text-lg">Course & Curriculum Directory</h3>
-                  <p className="text-xs text-slate-500 max-w-lg mx-auto mt-1">
-                    Synced with <code className="bg-slate-100 text-blue-700 px-1.5 py-0.5 rounded font-mono font-bold">Subject</code> model in Neon DB. Manage core subjects like Mathematics, English Language, Integrated Science, and ICT.
-                  </p>
-                </div>
-                <div className="flex justify-center gap-3 pt-2">
-                  <button onClick={() => setActiveTab('classes')} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition">
-                    Go to Classes & Subjects
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setActiveTab('migration')}
+                    className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs hover:bg-slate-200 transition flex items-center gap-2"
+                  >
+                    <span>🔄</span> Import from Sheets
+                  </button>
+                  <button
+                    onClick={openAddSubjectModal}
+                    className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
+                  >
+                    <span>➕</span> Add Subject
                   </button>
                 </div>
               </div>
+
+              {/* Notice */}
+              {subjectNotice && (
+                <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold px-4 py-3 rounded-xl flex items-center justify-between">
+                  <span>✅ {subjectNotice}</span>
+                  <button onClick={() => setSubjectNotice('')} className="text-emerald-600 hover:text-emerald-900 text-sm leading-none">
+                    &times;
+                  </button>
+                </div>
+              )}
+
+              {/* Search + Status Filter */}
+              <div className="flex flex-col sm:flex-row items-center gap-4 bg-white p-4 rounded-xl border border-slate-200">
+                <input
+                  type="text"
+                  placeholder="Search by subject, code, or instructor..."
+                  value={subjectSearchQuery}
+                  onChange={(e) => setSubjectSearchQuery(e.target.value)}
+                  className="flex-1 w-full px-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <select
+                  value={subjectStatusFilter}
+                  onChange={(e) => setSubjectStatusFilter(e.target.value)}
+                  className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                >
+                  <option value="All Statuses">All Statuses</option>
+                  <option value="Active">Active</option>
+                  <option value="Inactive">Inactive</option>
+                </select>
+                <span className="text-xs text-slate-500 whitespace-nowrap">
+                  {subjectLoading
+                    ? 'Loading...'
+                    : `Showing ${filteredSubjects.length} of ${subjects.length}`}
+                </span>
+              </div>
+
+              {/* Subjects Table */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                {subjectLoading ? (
+                  <div className="py-16 text-center text-slate-400 text-sm">Loading subjects...</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-50 text-slate-600 text-xs uppercase border-b border-slate-200">
+                        <tr>
+                          <th className="py-3 px-4">Code</th>
+                          <th className="py-3 px-4">Subject</th>
+                          <th className="py-3 px-4">Instructor</th>
+                          <th className="py-3 px-4">Credits</th>
+                          <th className="py-3 px-4">Semester</th>
+                          <th className="py-3 px-4">Status</th>
+                          <th className="py-3 px-4 text-center">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredSubjects.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="py-12 text-center text-slate-500 text-sm">
+                              {subjects.length === 0 ? (
+                                <div className="space-y-3">
+                                  <div className="text-3xl">📚</div>
+                                  <p className="font-semibold text-slate-700">No subjects added yet.</p>
+                                  <p className="text-xs text-slate-400">
+                                    Click &ldquo;Add Subject&rdquo; to get started, or import from Google Sheets.
+                                  </p>
+                                  <button
+                                    onClick={openAddSubjectModal}
+                                    className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                                  >
+                                    + Add First Subject
+                                  </button>
+                                </div>
+                              ) : (
+                                'No subjects match your search.'
+                              )}
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredSubjects.map((s) => (
+                            <tr key={s.id} className="hover:bg-slate-50/50">
+                              <td className="py-3 px-4 font-mono font-semibold text-blue-600">{s.code || '—'}</td>
+                              <td className="py-3 px-4 font-bold text-slate-900">{s.name}</td>
+                              <td className="py-3 px-4 text-slate-700">{s.instructorName || '—'}</td>
+                              <td className="py-3 px-4 text-slate-600">{s.credits}</td>
+                              <td className="py-3 px-4 text-slate-600">{s.semester || '—'}</td>
+                              <td className="py-3 px-4">
+                                <span
+                                  className={`px-2.5 py-1 rounded-full text-xs font-bold border ${
+                                    s.status === 'INACTIVE'
+                                      ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                      : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  }`}
+                                >
+                                  {s.status === 'INACTIVE' ? 'Inactive' : 'Active'}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-center">
+                                <button
+                                  onClick={() => openEditSubjectModal(s)}
+                                  className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                                  title="Edit subject"
+                                >
+                                  ✏️
+                                </button>
+                                <button
+                                  onClick={() => openDeleteSubjectModal(s)}
+                                  className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
+                                  title="Delete subject"
+                                >
+                                  🗑️
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* ADD / EDIT SUBJECT MODAL */}
+              {showSubjectModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+                  <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh]">
+                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                      <h3 className="text-base font-bold text-slate-900">
+                        {editingSubject ? 'Edit Subject' : 'Add New Subject'}
+                      </h3>
+                      <button
+                        onClick={() => setShowSubjectModal(false)}
+                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                    <form onSubmit={handleSubjectFormSubmit} className="flex flex-col overflow-y-auto">
+                      <div className="px-6 py-5 space-y-4">
+                        {subjectFormError && (
+                          <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-semibold px-3 py-2 rounded-lg">
+                            {subjectFormError}
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Subject Name *</label>
+                          <input
+                            type="text"
+                            required
+                            value={subjectForm.name}
+                            onChange={(e) => setSubjectForm({ ...subjectForm, name: e.target.value })}
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="e.g. Integrated Science"
+                          />
+                          {editingSubject?.code && (
+                            <p className="text-[11px] text-slate-400 mt-1">
+                              Code <span className="font-mono font-semibold">{editingSubject.code}</span> is assigned automatically.
+                            </p>
+                          )}
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Instructor</label>
+                          <input
+                            type="text"
+                            value={subjectForm.instructor}
+                            onChange={(e) => setSubjectForm({ ...subjectForm, instructor: e.target.value })}
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="e.g. Dr. Smith"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Credits *</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={99}
+                              required
+                              value={subjectForm.credits}
+                              onChange={(e) => setSubjectForm({ ...subjectForm, credits: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              placeholder="e.g. 3"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Semester</label>
+                            <input
+                              type="text"
+                              list="subject-semester-options"
+                              value={subjectForm.semester}
+                              onChange={(e) => setSubjectForm({ ...subjectForm, semester: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              placeholder="Optional"
+                            />
+                            <datalist id="subject-semester-options">
+                              <option value="Term 1" />
+                              <option value="Term 2" />
+                              <option value="Term 3" />
+                            </datalist>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Status</label>
+                          <select
+                            value={subjectForm.status}
+                            onChange={(e) => setSubjectForm({ ...subjectForm, status: e.target.value })}
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                          >
+                            <option value="Active">Active</option>
+                            <option value="Inactive">Inactive</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setShowSubjectModal(false)}
+                          className="px-4 py-2 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm hover:bg-slate-200 transition"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={subjectFormLoading}
+                          className="px-5 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition disabled:opacity-50"
+                        >
+                          {subjectFormLoading
+                            ? 'Saving...'
+                            : editingSubject
+                              ? 'Update Subject'
+                              : 'Save Subject'}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {/* DELETE SUBJECT MODAL */}
+              {showDeleteSubjectModal && deletingSubject && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+                  <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                      <h3 className="text-base font-bold text-slate-900">Delete Subject</h3>
+                      <button
+                        onClick={() => setShowDeleteSubjectModal(false)}
+                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                    <div className="px-6 py-5">
+                      <p className="text-sm text-slate-600 leading-relaxed">
+                        Are you sure you want to delete subject{' '}
+                        <strong className="text-slate-900">{deletingSubject.name}</strong>?
+                      </p>
+                      <p className="text-xs text-red-500 mt-2">This action cannot be undone.</p>
+                    </div>
+                    <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                      <button
+                        onClick={() => setShowDeleteSubjectModal(false)}
+                        className="px-4 py-2 rounded-xl bg-slate-200 text-slate-600 font-semibold text-sm hover:bg-slate-300 transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleDeleteSubject}
+                        disabled={deleteSubjectLoading}
+                        className="px-5 py-2 rounded-xl bg-red-500 text-white font-semibold text-sm hover:bg-red-600 transition disabled:opacity-50"
+                      >
+                        {deleteSubjectLoading ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2599,17 +3523,45 @@ export default function Dashboard() {
           {/* TAB: ACADEMIC YEARS */}
           {activeTab === 'academic-years' && (
             <div className="space-y-6">
+              {/* Header */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <h1 className="text-2xl font-bold text-slate-900">Academic Years & Terms</h1>
-                  <p className="text-sm text-slate-500">Configure academic sessions, terms, semester dates, and holiday calendars.</p>
+                  <h1 className="text-2xl font-bold text-slate-900">Academic Years &amp; Terms</h1>
+                  <p className="text-sm text-slate-500">Configure academic sessions and the current term for {tenant?.name}.</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setActiveTab('migration')}
+                    className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs hover:bg-slate-200 transition flex items-center gap-2"
+                  >
+                    <span>🔄</span> Import from Sheets
+                  </button>
+                  <button
+                    onClick={openAddYearModal}
+                    className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
+                  >
+                    <span>➕</span> Add Academic Year
+                  </button>
                 </div>
               </div>
 
+              {/* Notice */}
+              {yearNotice && (
+                <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold px-4 py-3 rounded-xl flex items-center justify-between">
+                  <span>✅ {yearNotice}</span>
+                  <button onClick={() => setYearNotice('')} className="text-emerald-600 hover:text-emerald-900 text-sm leading-none">
+                    &times;
+                  </button>
+                </div>
+              )}
+
+              {/* Current Session Summary */}
               <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
                 <div className="flex items-center justify-between pb-4 border-b border-slate-100">
                   <div>
-                    <h3 className="font-bold text-slate-900 text-base">Active Session: {stats?.activeYear || '2026/2027'}</h3>
+                    <h3 className="font-bold text-slate-900 text-base">
+                      Active Session: {stats?.activeYear || '—'}
+                    </h3>
                     <p className="text-xs text-slate-500">Current Term: {stats?.currentTerm || 'Term 1'}</p>
                   </div>
                   <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
@@ -2617,9 +3569,225 @@ export default function Dashboard() {
                   </span>
                 </div>
                 <p className="text-xs text-slate-600">
-                  Synced with <code className="bg-slate-100 text-blue-700 px-1.5 py-0.5 rounded font-mono font-bold">AcademicYear</code> table in Neon PostgreSQL.
+                  Only one academic year can be <strong>Active</strong> at a time. Marking a year active automatically
+                  archives the previous one. Filters, invoices, and attendance all follow the active session.
                 </p>
               </div>
+
+              {/* Search Bar */}
+              <div className="flex items-center gap-4 bg-white p-4 rounded-xl border border-slate-200">
+                <input
+                  type="text"
+                  placeholder="Search academic years..."
+                  value={yearSearchQuery}
+                  onChange={(e) => setYearSearchQuery(e.target.value)}
+                  className="flex-1 px-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <span className="text-xs text-slate-500 whitespace-nowrap">
+                  {yearLoading
+                    ? 'Loading...'
+                    : `Showing ${filteredAcademicYears.length} of ${academicYears.length}`}
+                </span>
+              </div>
+
+              {/* Academic Years List */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                {yearLoading ? (
+                  <div className="py-16 text-center text-slate-400 text-sm">Loading academic years...</div>
+                ) : filteredAcademicYears.length === 0 ? (
+                  <div className="py-12 text-center text-slate-500 text-sm space-y-3">
+                    {academicYears.length === 0 ? (
+                      <>
+                        <div className="text-3xl">🗓️</div>
+                        <p className="font-semibold text-slate-700">No academic years found.</p>
+                        <p className="text-xs text-slate-400">Click &ldquo;Add Academic Year&rdquo; to create your first session.</p>
+                        <button
+                          onClick={openAddYearModal}
+                          className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                        >
+                          + Add First Academic Year
+                        </button>
+                      </>
+                    ) : (
+                      'No academic years match your search.'
+                    )}
+                  </div>
+                ) : (
+                  <ul className="divide-y divide-slate-100">
+                    {filteredAcademicYears.map((y) => (
+                      <li
+                        key={y.id}
+                        className="px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 hover:bg-slate-50/50"
+                      >
+                        <div className="flex items-center gap-3 min-w-0 flex-wrap">
+                          <h4 className="font-bold text-slate-900">{y.year}</h4>
+                          <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                            {y.currentTerm || 'Term 1'}
+                          </span>
+                          {y._count && (y._count.classes > 0 || y._count.invoices > 0 || y._count.attendance > 0) && (
+                            <span className="text-[11px] text-slate-400">
+                              {y._count.classes} class(es) · {y._count.invoices} invoice(s) · {y._count.attendance} attendance
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 self-start">
+                          <span
+                            className={`px-2.5 py-1 rounded-full text-xs font-bold border ${
+                              y.status === 'Inactive'
+                                ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            }`}
+                          >
+                            {y.status === 'Inactive' ? 'Inactive' : 'Active'}
+                          </span>
+                          <button
+                            onClick={() => openEditYearModal(y)}
+                            className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                            title="Edit academic year"
+                          >
+                            ✏️
+                          </button>
+                          <button
+                            onClick={() => openDeleteYearModal(y)}
+                            className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base"
+                            title="Delete academic year"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              {/* ADD / EDIT ACADEMIC YEAR MODAL */}
+              {showYearModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+                  <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                      <h3 className="text-base font-bold text-slate-900">
+                        {editingYear ? 'Edit Academic Year' : 'Add New Academic Year'}
+                      </h3>
+                      <button
+                        onClick={() => setShowYearModal(false)}
+                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                    <form onSubmit={handleYearFormSubmit}>
+                      <div className="px-6 py-5 space-y-4">
+                        {yearFormError && (
+                          <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-semibold px-3 py-2 rounded-lg">
+                            {yearFormError}
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Academic Year *</label>
+                          <input
+                            type="text"
+                            required
+                            value={yearForm.year}
+                            onChange={(e) => setYearForm({ ...yearForm, year: e.target.value })}
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="e.g. 2026-2027"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Status</label>
+                            <select
+                              value={yearForm.status}
+                              onChange={(e) => setYearForm({ ...yearForm, status: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                            >
+                              <option value="Active">Active</option>
+                              <option value="Inactive">Inactive</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Current Term</label>
+                            <select
+                              value={yearForm.currentTerm}
+                              onChange={(e) => setYearForm({ ...yearForm, currentTerm: e.target.value })}
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                            >
+                              <option value="Term 1">Term 1</option>
+                              <option value="Term 2">Term 2</option>
+                              <option value="Term 3">Term 3</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {yearForm.status === 'Active' && (
+                          <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                            Saving this as <strong>Active</strong> will archive the school&rsquo;s current active session.
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setShowYearModal(false)}
+                          className="px-4 py-2 rounded-xl bg-slate-200 text-slate-600 font-semibold text-sm hover:bg-slate-300 transition"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={yearFormLoading}
+                          className="px-5 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 transition disabled:opacity-50"
+                        >
+                          {yearFormLoading ? 'Saving...' : editingYear ? 'Update Year' : 'Save Year'}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {/* DELETE ACADEMIC YEAR MODAL */}
+              {showDeleteYearModal && deletingYear && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+                  <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                      <h3 className="text-base font-bold text-slate-900">Delete Academic Year</h3>
+                      <button
+                        onClick={() => setShowDeleteYearModal(false)}
+                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                    <div className="px-6 py-5">
+                      <p className="text-sm text-slate-600 leading-relaxed">
+                        Are you sure you want to delete{' '}
+                        <strong className="text-slate-900">{deletingYear.year}</strong>?
+                      </p>
+                      <p className="text-xs text-red-500 mt-2">This action cannot be undone.</p>
+                    </div>
+                    <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                      <button
+                        onClick={() => setShowDeleteYearModal(false)}
+                        className="px-4 py-2 rounded-xl bg-slate-200 text-slate-600 font-semibold text-sm hover:bg-slate-300 transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleDeleteYear}
+                        disabled={deleteYearLoading}
+                        className="px-5 py-2 rounded-xl bg-red-500 text-white font-semibold text-sm hover:bg-red-600 transition disabled:opacity-50"
+                      >
+                        {deleteYearLoading ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

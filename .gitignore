@@ -16,6 +16,8 @@
 # next.js
 /.next/
 /out/
+# stale build cache from a Turbopack/OneDrive cache issue (safe to delete)
+/next_old_tmp/
 
 # production
 /build

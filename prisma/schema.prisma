@@ -182,6 +182,7 @@ model Subject {
   name         String
   instructorId String?
   instructor   User?         @relation("SubjectInstructor", fields: [instructorId], references: [id])
+  instructorName String?
   credits      Int           @default(1)
   semester     String?
   status       AccountStatus @default(ACTIVE)
