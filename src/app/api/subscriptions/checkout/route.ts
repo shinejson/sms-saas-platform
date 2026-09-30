@@ -1,14 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
-
-const PLAN_PRICES_GHS: Record<string, { amount: number; limit: number }> = {
-  COPPER: { amount: 150.0, limit: 100 },
-  SILVER: { amount: 300.0, limit: 250 },
-  DIAMOND: { amount: 450.0, limit: 400 },
-  GOLD: { amount: 600.0, limit: 600 },
-  ENTERPRISE: { amount: 1200.0, limit: 2000 },
-};
+import {
+  SUBSCRIPTION_PLANS,
+  getPlanPrice,
+} from '@/lib/subscriptions';
+import {
+  initializeGatewayPayment,
+  GatewayType,
+  getTenantPaymentGateways,
+} from '@/lib/payment-gateways';
 
 export async function POST(req: NextRequest) {
   try {
@@ -17,14 +18,22 @@ export async function POST(req: NextRequest) {
     const session = token ? verifyToken(token) : null;
 
     if (!session || (session.role !== 'SUPER_ADMIN' && session.role !== 'SCHOOL_ADMIN')) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized. Administrator privilege required.' }, { status: 401 });
     }
 
-    const { plan } = await req.json();
-    const planConfig = PLAN_PRICES_GHS[plan?.toUpperCase()];
+    const body = await req.json();
+    const {
+      plan: selectedPlanKey,
+      billingCycle = 'monthly',
+      gateway: requestedGateway,
+      simulate = false,
+    } = body;
 
-    if (!planConfig) {
-      return NextResponse.json({ error: 'Invalid plan selected' }, { status: 400 });
+    const planKey = (selectedPlanKey || '').toUpperCase();
+    const planConfig = SUBSCRIPTION_PLANS[planKey];
+
+    if (!planConfig || planKey === 'DEMO') {
+      return NextResponse.json({ error: 'Invalid or unsupported subscription tier selected.' }, { status: 400 });
     }
 
     const tenant = await prisma.tenant.findUnique({
@@ -32,55 +41,37 @@ export async function POST(req: NextRequest) {
     });
 
     if (!tenant) {
-      return NextResponse.json({ error: 'Tenant not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Tenant school record not found.' }, { status: 404 });
     }
 
-    // Initialize Paystack transaction (Ghana Mobile Money & Cards)
-    const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
-    if (!paystackSecret || paystackSecret.startsWith('sk_test_replace')) {
-      // Mock sandbox mode for testing before live API keys are provided
-      const reference = 'PAY_' + Date.now();
-      return NextResponse.json({
-        success: true,
-        reference,
-        amount: planConfig.amount,
-        currency: 'GHS',
-        message: 'Paystack checkout initialized (Sandbox mode).',
-        authorizationUrl: `https://checkout.paystack.com/mock/${reference}`,
-      });
-    }
+    // Determine gateway: requested or default
+    const configs = await getTenantPaymentGateways(session.tenantId);
+    const gateway: GatewayType = (requestedGateway || configs.defaultGateway || 'paystack') as GatewayType;
 
-    const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${paystackSecret}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        email: session.email,
-        amount: Math.round(planConfig.amount * 100), // in Pesewas (kobo)
-        currency: 'GHS',
-        callback_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard/settings?payment=success`,
-        metadata: {
-          tenantId: tenant.id,
-          plan: plan.toUpperCase(),
-          studentLimit: planConfig.limit,
-        },
-      }),
+    const amount = getPlanPrice(planKey, billingCycle);
+    const currency = configs.currency || tenant.currency || 'GHS';
+
+    const result = await initializeGatewayPayment({
+      gateway,
+      amount,
+      currency,
+      email: session.email,
+      tenantId: tenant.id,
+      plan: planKey,
+      studentLimit: planConfig.studentLimit,
+      billingCycle,
+      callbackUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/dashboard?tab=subscription&payment=success&plan=${planKey}&cycle=${billingCycle}`,
+      simulate,
     });
-
-    const data = await paystackRes.json();
-    if (!data.status) {
-      return NextResponse.json({ error: data.message || 'Payment initialization failed' }, { status: 400 });
-    }
 
     return NextResponse.json({
-      success: true,
-      authorizationUrl: data.data.authorization_url,
-      reference: data.data.reference,
+      ...result,
+      plan: planKey,
+      studentLimit: planConfig.studentLimit,
+      billingCycle,
     });
   } catch (error: any) {
-    console.error('Subscription error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error('Subscription checkout error:', error);
+    return NextResponse.json({ error: error.message || 'Internal server error' }, { status: 500 });
   }
 }

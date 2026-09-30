@@ -1,49 +1,107 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { executeAutoUpgrade } from '@/lib/payment-gateways';
 
 export async function POST(req: NextRequest) {
   try {
-    const event = await req.json();
-
-    // Verify Paystack payment success event
-    if (event.event === 'charge.success') {
-      const metadata = event.data.metadata;
-      const tenantId = metadata?.tenantId;
-      const plan = metadata?.plan;
-      const studentLimit = Number(metadata?.studentLimit) || 100;
-
-      if (tenantId && plan) {
-        await prisma.$transaction([
-          prisma.tenant.update({
-            where: { id: tenantId },
-            data: {
-              plan: plan as any,
-              studentLimit,
-              status: 'ACTIVE',
-            },
-          }),
-          prisma.subscription.create({
-            data: {
-              tenantId,
-              plan: plan as any,
-              studentLimit,
-              amount: event.data.amount / 100,
-              currency: event.data.currency || 'GHS',
-              billingCycle: 'monthly',
-              status: 'active',
-              paymentGateway: 'paystack',
-              gatewayReference: event.data.reference,
-              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
-            },
-          }),
-        ]);
-        console.log(`Successfully activated ${plan} plan for tenant ${tenantId}`);
-      }
+    const rawBody = await req.text();
+    let event: any;
+    try {
+      event = JSON.parse(rawBody);
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON payload' }, { status: 400 });
     }
 
-    return NextResponse.json({ received: true });
+    // 1. Paystack Webhook Event
+    if (event?.event === 'charge.success') {
+      const data = event.data || {};
+      const metadata = data.metadata || {};
+      const tenantId = metadata.tenantId;
+      const plan = metadata.plan;
+      const billingCycle = metadata.billingCycle || 'monthly';
+      const studentLimit = Number(metadata.studentLimit) || undefined;
+      const amount = (data.amount || 0) / 100;
+      const currency = data.currency || 'GHS';
+      const reference = data.reference || `PAYSTACK_${Date.now()}`;
+
+      if (tenantId && plan) {
+        await executeAutoUpgrade({
+          tenantId,
+          plan,
+          billingCycle,
+          studentLimit,
+          amount,
+          currency,
+          gateway: 'paystack',
+          reference,
+        });
+        console.log(`[Paystack Webhook] Successfully auto-upgraded ${tenantId} to ${plan}`);
+      }
+      return NextResponse.json({ received: true, gateway: 'paystack' });
+    }
+
+    // 2. Flutterwave Webhook Event
+    if (
+      event?.event === 'charge.completed' ||
+      event?.['event.type'] === 'CARD_TRANSACTION' ||
+      event?.data?.status === 'successful'
+    ) {
+      const data = event.data || {};
+      const meta = data.meta || {};
+      const tenantId = meta.tenantId;
+      const plan = meta.plan;
+      const billingCycle = meta.billingCycle || 'monthly';
+      const studentLimit = Number(meta.studentLimit) || undefined;
+      const amount = data.amount || 0;
+      const currency = data.currency || 'GHS';
+      const reference = data.tx_ref || `FLW_${Date.now()}`;
+
+      if (tenantId && plan) {
+        await executeAutoUpgrade({
+          tenantId,
+          plan,
+          billingCycle,
+          studentLimit,
+          amount,
+          currency,
+          gateway: 'flutterwave',
+          reference,
+        });
+        console.log(`[Flutterwave Webhook] Successfully auto-upgraded ${tenantId} to ${plan}`);
+      }
+      return NextResponse.json({ received: true, gateway: 'flutterwave' });
+    }
+
+    // 3. Stripe Webhook Event
+    if (event?.type === 'checkout.session.completed') {
+      const sessionObj = event.data?.object || {};
+      const metadata = sessionObj.metadata || {};
+      const tenantId = metadata.tenantId;
+      const plan = metadata.plan;
+      const billingCycle = metadata.billingCycle || 'monthly';
+      const studentLimit = Number(metadata.studentLimit) || undefined;
+      const amount = (sessionObj.amount_total || 0) / 100;
+      const currency = (sessionObj.currency || 'ghs').toUpperCase();
+      const reference = sessionObj.id || `STRIPE_${Date.now()}`;
+
+      if (tenantId && plan) {
+        await executeAutoUpgrade({
+          tenantId,
+          plan,
+          billingCycle,
+          studentLimit,
+          amount,
+          currency,
+          gateway: 'stripe',
+          reference,
+        });
+        console.log(`[Stripe Webhook] Successfully auto-upgraded ${tenantId} to ${plan}`);
+      }
+      return NextResponse.json({ received: true, gateway: 'stripe' });
+    }
+
+    return NextResponse.json({ received: true, unhandled: event?.event || event?.type });
   } catch (error: any) {
-    console.error('Webhook error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error('Webhook processing error:', error);
+    return NextResponse.json({ error: error.message || 'Webhook error' }, { status: 500 });
   }
 }

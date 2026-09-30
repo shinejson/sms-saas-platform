@@ -1,8 +1,15 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ImportStudentsModal from './ImportStudentsModal';
 import * as XLSX from 'xlsx';
+import {
+  SUBSCRIPTION_PLANS,
+  SubscriptionStatusInfo,
+  calculateSubscriptionStatus,
+  getPlanPrice,
+  getBillingCycleDays,
+} from '@/lib/subscriptions';
 
 interface TenantInfo {
   id: string;
@@ -12,11 +19,60 @@ interface TenantInfo {
   currency?: string;
   plan: string;
   studentLimit: number;
+  status?: string;
   logoUrl?: string;
   address?: string;
   phone?: string;
   email?: string;
   customDomain?: string;
+  subscription?: {
+    plan: string;
+    status: string;
+    daysRemaining: number;
+    isExpiringSoon: boolean;
+    isExpired: boolean;
+    currentPeriodEnd: string;
+    billingCycle: string;
+  };
+}
+
+interface SubscriptionRecord {
+  id: string;
+  plan: string;
+  studentLimit: number;
+  amount: number;
+  currency: string;
+  billingCycle: string;
+  status: string;
+  paymentGateway: string;
+  gatewayReference?: string;
+  currentPeriodStart: string;
+  currentPeriodEnd: string;
+  createdAt: string;
+}
+
+interface SubscriptionData {
+  tenant: TenantInfo;
+  currentSubscription: SubscriptionRecord | null;
+  statusInfo: SubscriptionStatusInfo;
+  usage: {
+    studentCount: number;
+    studentLimit: number;
+    quotaPercentage: number;
+    remainingSlots: number;
+  };
+  plans: Array<{
+    key: string;
+    name: string;
+    studentLimit: number;
+    priceMonthly: number;
+    priceTermly: number;
+    priceAnnual: number;
+    popular?: boolean;
+    description: string;
+    features: string[];
+  }>;
+  history: SubscriptionRecord[];
 }
 
 interface UserInfo {
@@ -517,6 +573,12 @@ const MigrationIcon = ({ className = 'w-5 h-5' }: { className?: string }) => (
   </svg>
 );
 
+const SubscriptionIcon = ({ className = 'w-5 h-5' }: { className?: string }) => (
+  <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+  </svg>
+);
+
 export default function Dashboard() {
   const [token, setToken] = useState<string | null>(null);
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
@@ -529,6 +591,9 @@ export default function Dashboard() {
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchDropdownOpen, setSearchDropdownOpen] = useState(false);
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Billing state
   const [billingItems, setBillingItems] = useState<BillingItem[]>([]);
@@ -564,6 +629,19 @@ export default function Dashboard() {
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const [testMode, setTestMode] = useState(false);
+
+  // Subscription state
+  const [subscriptionData, setSubscriptionData] = useState<SubscriptionData | null>(null);
+  const [subscriptionLoading, setSubscriptionLoading] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [billingCycle, setBillingCycle] = useState<'monthly' | 'termly' | 'annual'>('monthly');
+  const [paywallCycle, setPaywallCycle] = useState<'monthly' | 'termly' | 'annual'>('monthly');
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [selectedCheckoutPlan, setSelectedCheckoutPlan] = useState<string | null>(null);
+  const [selectedPaywallPlan, setSelectedPaywallPlan] = useState<string>('SILVER');
+  const [receiptModalSub, setReceiptModalSub] = useState<SubscriptionRecord | null>(null);
+  const [simulationLoading, setSimulationLoading] = useState(false);
+  const [subscriptionToast, setSubscriptionToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   // Filter and Analytics States
   const [availableYears, setAvailableYears] = useState<AcademicYearOption[]>([]);
@@ -1006,11 +1084,52 @@ export default function Dashboard() {
   const [reportFilterClass, setReportFilterClass] = useState('');
 
   // Per-Tenant Settings State
-  const [settingsActiveSubTab, setSettingsActiveSubTab] = useState<'profile' | 'grading' | 'lists' | 'backup' | 'audit'>('profile');
+  const [settingsActiveSubTab, setSettingsActiveSubTab] = useState<'profile' | 'grading' | 'lists' | 'backup' | 'audit' | 'gateways'>('profile');
   const [tenantSettings, setTenantSettings] = useState<TenantSettingsData | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsFetched, setSettingsFetched] = useState(false);
   const [settingsNotice, setSettingsNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Payment Gateways Settings State
+  const [gatewaySettings, setGatewaySettings] = useState<{
+    defaultGateway: 'paystack' | 'flutterwave' | 'stripe' | 'sandbox';
+    currency: string;
+    paystack: {
+      enabled: boolean;
+      mode: 'test' | 'live';
+      publicKey: string;
+      secretKey: string;
+      hasSecretKey?: boolean;
+      channels: string[];
+    };
+    flutterwave: {
+      enabled: boolean;
+      mode: 'test' | 'live';
+      publicKey: string;
+      secretKey: string;
+      hasSecretKey?: boolean;
+      encryptionKey: string;
+      channels: string[];
+    };
+    stripe: {
+      enabled: boolean;
+      mode: 'test' | 'live';
+      publicKey: string;
+      secretKey: string;
+      hasSecretKey?: boolean;
+    };
+  }>({
+    defaultGateway: 'paystack',
+    currency: 'GHS',
+    paystack: { enabled: true, mode: 'test', publicKey: '', secretKey: '', channels: ['mobile_money', 'card'] },
+    flutterwave: { enabled: true, mode: 'test', publicKey: '', secretKey: '', encryptionKey: '', channels: ['mobilemoneyghana', 'card', 'banktransfer', 'ussd'] },
+    stripe: { enabled: false, mode: 'test', publicKey: '', secretKey: '' },
+  });
+  const [gatewaysLoading, setGatewaysLoading] = useState(false);
+  const [gatewaysSaving, setGatewaysSaving] = useState(false);
+  const [gatewaysNotice, setGatewaysNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const [selectedCheckoutGateway, setSelectedCheckoutGateway] = useState<'paystack' | 'flutterwave' | 'stripe' | 'sandbox'>('paystack');
 
   // Profile Form state
   const [profileForm, setProfileForm] = useState({
@@ -1079,12 +1198,226 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Fetch stats, students, and billing data once token is loaded
+  // Subscription data fetching & management
+  const fetchSubscriptionData = useCallback(async () => {
+    if (!token) return;
+    setSubscriptionLoading(true);
+    try {
+      const res = await fetch('/api/subscriptions', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSubscriptionData(data);
+        if (data.tenant) {
+          setTenant((prev) => ({
+            ...(prev || {}),
+            ...data.tenant,
+            plan: data.tenant.plan,
+            studentLimit: data.tenant.studentLimit,
+            subscription: {
+              plan: data.tenant.plan,
+              status: data.statusInfo?.status || 'active',
+              daysRemaining: data.statusInfo?.daysRemaining ?? 14,
+              isExpiringSoon: !!data.statusInfo?.isExpiringSoon,
+              isExpired: !!data.statusInfo?.isExpired,
+              currentPeriodEnd: data.statusInfo?.currentPeriodEnd || '',
+              billingCycle: data.currentSubscription?.billingCycle || 'monthly',
+            },
+          }));
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching subscription data:', err);
+    } finally {
+      setSubscriptionLoading(false);
+    }
+  }, [token]);
+
+  const handleInitiateCheckout = async (
+    planKey: string,
+    cycle: 'monthly' | 'termly' | 'annual' = billingCycle,
+    simulate: boolean = false,
+    gatewayOverride?: 'paystack' | 'flutterwave' | 'stripe' | 'sandbox'
+  ) => {
+    if (!token) return;
+    setCheckoutLoading(true);
+    setSelectedCheckoutPlan(planKey);
+    const chosenGateway = gatewayOverride || (simulate ? 'sandbox' : selectedCheckoutGateway);
+    try {
+      const res = await fetch('/api/subscriptions/checkout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          plan: planKey,
+          billingCycle: cycle,
+          gateway: chosenGateway,
+          simulate,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        if (data.activated) {
+          setSubscriptionToast({
+            message: data.message || `Successfully activated ${planKey} plan!`,
+            type: 'success',
+          });
+          setShowUpgradeModal(false);
+          await fetchSubscriptionData();
+          fetchDashboardData();
+        } else if (data.authorizationUrl) {
+          window.location.href = data.authorizationUrl;
+        }
+      } else {
+        alert(data.error || 'Checkout initiation failed.');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Network error during checkout.');
+    } finally {
+      setCheckoutLoading(false);
+      setSelectedCheckoutPlan(null);
+    }
+  };
+
+  const handleSimulateStatus = async (action: 'set_expiring' | 'set_expired' | 'set_active') => {
+    if (!token) return;
+    setSimulationLoading(true);
+    try {
+      const res = await fetch('/api/subscriptions/simulate-status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSubscriptionToast({
+          message: data.message || `Simulation updated: ${action}`,
+          type: 'info',
+        });
+        if (action === 'set_expiring') setBannerDismissed(false);
+        await fetchSubscriptionData();
+        fetchDashboardData();
+      } else {
+        alert(data.error || 'Failed to update simulation');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Error executing simulation');
+    } finally {
+      setSimulationLoading(false);
+    }
+  };
+
+  // Fetch stats, students, billing and subscription data once token is loaded
   useEffect(() => {
     if (!token) return;
     fetchDashboardData();
     fetchBillingData();
-  }, [token]);
+    fetchSubscriptionData();
+    fetchGatewaySettings();
+  }, [token, fetchSubscriptionData]);
+
+  // Online Payment Return Verification (Paystack, Flutterwave, Stripe)
+  useEffect(() => {
+    if (!token) return;
+    if (typeof window === 'undefined') return;
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const isPaymentReturn = urlParams.get('payment') === 'success';
+    const ref =
+      urlParams.get('reference') ||
+      urlParams.get('trxref') ||
+      urlParams.get('session_id') ||
+      urlParams.get('tx_ref') ||
+      urlParams.get('transaction_id');
+
+    if (isPaymentReturn && ref) {
+      const plan = urlParams.get('plan') || 'SILVER';
+      const cycle = urlParams.get('cycle') || 'monthly';
+      const gateway = urlParams.get('session_id')
+        ? 'stripe'
+        : (urlParams.get('tx_ref') || urlParams.get('transaction_id'))
+        ? 'flutterwave'
+        : (urlParams.get('gateway') || 'paystack');
+
+      const verifyReturn = async () => {
+        try {
+          const res = await fetch('/api/subscriptions/verify', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              reference: ref,
+              gateway,
+              plan,
+              billingCycle: cycle,
+            }),
+          });
+          const data = await res.json();
+          if (res.ok && data.success) {
+            setSubscriptionToast({
+              message: data.message || `Payment verified! School upgraded to ${plan} Plan.`,
+              type: 'success',
+            });
+            window.history.replaceState({}, document.title, window.location.pathname + '?tab=subscription');
+            await fetchSubscriptionData();
+            fetchDashboardData();
+          } else {
+            setSubscriptionToast({
+              message: data.error || 'Payment verification could not be confirmed.',
+              type: 'error',
+            });
+          }
+        } catch (e: any) {
+          console.error('Payment callback verification error:', e);
+        }
+      };
+
+      verifyReturn();
+    }
+  }, [token, fetchSubscriptionData]);
+
+  // Global search outside-click & keyboard shortcut (Ctrl+K or /) listener
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
+        setSearchDropdownOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSearchDropdownOpen(false);
+      } else if (
+        (e.key === 'k' && (e.metaKey || e.ctrlKey)) ||
+        (e.key === '/' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA')
+      ) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        setSearchDropdownOpen(true);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
+  // Refetch subscription when switching to subscription tab
+  useEffect(() => {
+    if (activeTab === 'subscription' && token) {
+      fetchSubscriptionData();
+    }
+  }, [activeTab, token, fetchSubscriptionData]);
 
   const fetchBillingData = async () => {
     if (!token) return;
@@ -3926,6 +4259,78 @@ export default function Dashboard() {
     }
   };
 
+  const fetchGatewaySettings = async () => {
+    if (!token) return;
+    setGatewaysLoading(true);
+    try {
+      const res = await fetch('/api/settings/payment-gateways', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.settings) {
+          setGatewaySettings((prev) => ({
+            ...prev,
+            ...data.settings,
+            paystack: { ...prev.paystack, ...data.settings.paystack },
+            flutterwave: { ...prev.flutterwave, ...data.settings.flutterwave },
+            stripe: { ...prev.stripe, ...data.settings.stripe },
+          }));
+          if (data.settings.defaultGateway) {
+            setSelectedCheckoutGateway(data.settings.defaultGateway);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load gateway settings:', err);
+    } finally {
+      setGatewaysLoading(false);
+    }
+  };
+
+  const handleSaveGatewaySettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setGatewaysSaving(true);
+    setGatewaysNotice(null);
+    try {
+      const res = await fetch('/api/settings/payment-gateways', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(gatewaySettings),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setGatewaysNotice({ type: 'success', message: 'Payment gateway configurations saved successfully!' });
+        if (data.settings) {
+          setGatewaySettings((prev) => ({
+            ...prev,
+            ...data.settings,
+            paystack: { ...prev.paystack, ...data.settings.paystack },
+            flutterwave: { ...prev.flutterwave, ...data.settings.flutterwave },
+            stripe: { ...prev.stripe, ...data.settings.stripe },
+          }));
+        }
+      } else {
+        setGatewaysNotice({ type: 'error', message: data.error || 'Failed to save gateway configuration.' });
+      }
+    } catch (err: any) {
+      setGatewaysNotice({ type: 'error', message: err.message || 'Network error saving gateway settings.' });
+    } finally {
+      setGatewaysSaving(false);
+    }
+  };
+
+  const handleCopyWebhook = () => {
+    const webhookUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/api/subscriptions/webhook`;
+    navigator.clipboard?.writeText(webhookUrl);
+    setCopiedWebhook(true);
+    setTimeout(() => setCopiedWebhook(false), 2500);
+  };
+
 
 
   // SVG Chart 1: Payment Status by Class (Paid in Green #10b981 vs Unpaid in Red #ef4444)
@@ -4590,15 +4995,200 @@ export default function Dashboard() {
     window.location.href = '/';
   };
 
+  const handleTopnavSearchChange = (val: string) => {
+    setSearchQuery(val);
+    if (val.trim().length > 0) {
+      setSearchDropdownOpen(true);
+    } else {
+      setSearchDropdownOpen(false);
+    }
+
+    // Contextual Sync with Active Tab's filter
+    const lower = val.trim();
+    if (activeTab === 'teachers') setTeacherSearchQuery(lower);
+    else if (activeTab === 'classes') setClassSearchQuery(lower);
+    else if (activeTab === 'subjects') setSubjectSearchQuery(lower);
+    else if (activeTab === 'billing') setInvoiceSearchQuery(lower);
+    else if (activeTab === 'academic-years') setYearSearchQuery(lower);
+    else if (activeTab === 'users') setUserSearchQuery(lower);
+    else if (activeTab === 'parents') setParentSearchQuery(lower);
+    else if (activeTab === 'permissions') setPermissionSearchQuery(lower);
+    else if (activeTab === 'attendance') setAttendanceSearchQuery(lower);
+    else if (activeTab === 'performance') setPerformanceSearchQuery(lower);
+  };
+
+  const handleClearTopnavSearch = () => {
+    setSearchQuery('');
+    setSearchDropdownOpen(false);
+    if (activeTab === 'teachers') setTeacherSearchQuery('');
+    else if (activeTab === 'classes') setClassSearchQuery('');
+    else if (activeTab === 'subjects') setSubjectSearchQuery('');
+    else if (activeTab === 'billing') setInvoiceSearchQuery('');
+    else if (activeTab === 'academic-years') setYearSearchQuery('');
+    else if (activeTab === 'users') setUserSearchQuery('');
+    else if (activeTab === 'parents') setParentSearchQuery('');
+    else if (activeTab === 'permissions') setPermissionSearchQuery('');
+    else if (activeTab === 'attendance') setAttendanceSearchQuery('');
+    else if (activeTab === 'performance') setPerformanceSearchQuery('');
+  };
+
   const filteredStudents = students.filter((s) => {
     const q = searchQuery.toLowerCase();
+    const fullName = `${s.firstName} ${s.lastName}`.toLowerCase();
     return (
+      fullName.includes(q) ||
       s.firstName.toLowerCase().includes(q) ||
       s.lastName.toLowerCase().includes(q) ||
       s.studentId.toLowerCase().includes(q) ||
       (s.guardianName && s.guardianName.toLowerCase().includes(q))
     );
   });
+
+  // Topnav Global Omnisearch Pages & Modules Definition
+  const NAVIGATION_PAGES = [
+    { id: 'overview', name: 'Dashboard Overview', desc: 'Real-time KPIs & operational summaries', icon: '📊', tab: 'overview' },
+    { id: 'students', name: 'Students Directory', desc: 'Enrollment, student profiles & records', icon: '🎓', tab: 'students' },
+    { id: 'teachers', name: 'Teachers & Faculty Directory', desc: 'Faculty staff, classes & contacts', icon: '👨‍🏫', tab: 'teachers' },
+    { id: 'classes', name: 'Classes & Streams', desc: 'Classrooms, streams & form teachers', icon: '🏫', tab: 'classes' },
+    { id: 'subjects', name: 'Subjects Curriculum', desc: 'GES courses, subject assignments', icon: '📚', tab: 'subjects' },
+    { id: 'attendance', name: 'Attendance Register', desc: 'Daily attendance logs & absentees', icon: '📅', tab: 'attendance' },
+    { id: 'performance', name: 'Assessment & GES Scores', desc: 'Continuous assessments & terminal exams', icon: '📝', tab: 'performance' },
+    { id: 'terminal-report', name: 'Terminal Report Cards', desc: 'Printable WAEC/GES terminal report cards', icon: '📋', tab: 'performance', action: 'terminal_report' },
+    { id: 'billing', name: 'Fees & Invoicing', desc: 'Fee categories, student bills & items', icon: '🧾', tab: 'billing' },
+    { id: 'payments', name: 'Payment Records', desc: 'Receipts, MoMo payments & fee ledger', icon: '💰', tab: 'payments' },
+    { id: 'reports', name: 'Reports & Analytics', desc: 'Academic, financial & attendance reports', icon: '📈', tab: 'reports' },
+    { id: 'academic-years', name: 'Academic Years & Terms', desc: 'Active school terms & semester configuration', icon: '🗓️', tab: 'academic-years' },
+    { id: 'subscription', name: 'Subscription & Licensing', desc: 'Plan upgrade, quotas & online renewal', icon: '💳', tab: 'subscription' },
+    { id: 'settings', name: 'School Profile Settings', desc: 'School name, logo, grading scale & lists', icon: '⚙️', tab: 'settings', subTab: 'profile' },
+    { id: 'gateways', name: 'Payment Gateways Config', desc: 'Paystack, Flutterwave, Stripe credentials', icon: '💳', tab: 'settings', subTab: 'gateways' },
+    { id: 'users', name: 'System Users', desc: 'Staff logins, administrators & credentials', icon: '👥', tab: 'users' },
+    { id: 'permissions', name: 'Permissions Matrix', desc: 'Role capabilities & administrative rights', icon: '🛡️', tab: 'permissions' },
+    { id: 'parents', name: 'Parent Portals', desc: 'Student-guardian mapping & portal access', icon: '👨‍👩‍👧', tab: 'parents' },
+  ];
+
+  const searchNormalized = searchQuery.trim().toLowerCase();
+
+  const matchedStudents = searchNormalized
+    ? students
+        .filter((s) => {
+          const fullName = `${s.firstName} ${s.lastName}`.toLowerCase();
+          const id = (s.studentId || '').toLowerCase();
+          const cls = (s.class?.name || '').toLowerCase();
+          const guardian = (s.guardianName || '').toLowerCase();
+          return (
+            fullName.includes(searchNormalized) ||
+            id.includes(searchNormalized) ||
+            cls.includes(searchNormalized) ||
+            guardian.includes(searchNormalized)
+          );
+        })
+        .slice(0, 5)
+    : [];
+
+  const matchedTeachers = searchNormalized
+    ? teachers
+        .filter((t) => {
+          const fullName = `${t.firstName} ${t.lastName}`.toLowerCase();
+          const id = (t.teacherId || '').toLowerCase();
+          const cls = (t.className || '').toLowerCase();
+          return fullName.includes(searchNormalized) || id.includes(searchNormalized) || cls.includes(searchNormalized);
+        })
+        .slice(0, 4)
+    : [];
+
+  const matchedClasses = searchNormalized
+    ? classesList
+        .filter((c) => {
+          const name = (c.name || '').toLowerCase();
+          const teacher = (c.classTeacher?.fullName || '').toLowerCase();
+          return name.includes(searchNormalized) || teacher.includes(searchNormalized);
+        })
+        .slice(0, 4)
+    : [];
+
+  const matchedSubjects = searchNormalized
+    ? subjects
+        .filter((s) => {
+          const name = (s.name || '').toLowerCase();
+          const instructor = (s.instructorName || '').toLowerCase();
+          return name.includes(searchNormalized) || instructor.includes(searchNormalized);
+        })
+        .slice(0, 3)
+    : [];
+
+  const matchedInvoices = searchNormalized
+    ? invoicesList
+        .filter((inv) => {
+          const num = (inv.invoiceNumber || inv.id || '').toLowerCase();
+          const sName = `${inv.student?.firstName || ''} ${inv.student?.lastName || ''}`.toLowerCase();
+          const status = (inv.status || '').toLowerCase();
+          return num.includes(searchNormalized) || sName.includes(searchNormalized) || status.includes(searchNormalized);
+        })
+        .slice(0, 4)
+    : [];
+
+  const matchedPages = searchNormalized
+    ? NAVIGATION_PAGES.filter(
+        (p) =>
+          p.name.toLowerCase().includes(searchNormalized) ||
+          p.desc.toLowerCase().includes(searchNormalized) ||
+          p.tab.toLowerCase().includes(searchNormalized)
+      ).slice(0, 4)
+    : [];
+
+  const totalSearchResults =
+    matchedStudents.length +
+    matchedTeachers.length +
+    matchedClasses.length +
+    matchedSubjects.length +
+    matchedInvoices.length +
+    matchedPages.length;
+
+  const topFirstSearchResult =
+    matchedStudents.length > 0
+      ? () => {
+          const s = matchedStudents[0];
+          setActiveTab('students');
+          setSearchQuery(`${s.firstName} ${s.lastName}`);
+          setSearchDropdownOpen(false);
+        }
+      : matchedTeachers.length > 0
+      ? () => {
+          const t = matchedTeachers[0];
+          setActiveTab('teachers');
+          setTeacherSearchQuery(`${t.firstName} ${t.lastName}`);
+          setSearchDropdownOpen(false);
+        }
+      : matchedClasses.length > 0
+      ? () => {
+          const c = matchedClasses[0];
+          setActiveTab('classes');
+          setClassSearchQuery(c.name);
+          setSearchDropdownOpen(false);
+        }
+      : matchedInvoices.length > 0
+      ? () => {
+          const inv = matchedInvoices[0];
+          setActiveTab('billing');
+          setInvoiceSearchQuery(inv.invoiceNumber || inv.id);
+          setSearchDropdownOpen(false);
+        }
+      : matchedSubjects.length > 0
+      ? () => {
+          const s = matchedSubjects[0];
+          setActiveTab('subjects');
+          setSubjectSearchQuery(s.name);
+          setSearchDropdownOpen(false);
+        }
+      : matchedPages.length > 0
+      ? () => {
+          const p = matchedPages[0];
+          setActiveTab(p.tab as any);
+          if ((p as any).subTab) setSettingsActiveSubTab((p as any).subTab);
+          if ((p as any).action === 'terminal_report') setShowTerminalReportModal(true);
+          setSearchDropdownOpen(false);
+        }
+      : null;
 
   const userInitials = user?.fullName
 
@@ -4849,6 +5439,30 @@ export default function Dashboard() {
             </div>
             <div className="space-y-0.5">
               <button
+                onClick={() => { setActiveTab('subscription'); setMobileMenuOpen(false); }}
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition ${
+                  activeTab === 'subscription'
+                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <SubscriptionIcon className={`w-5 h-5 shrink-0 ${activeTab === 'subscription' ? 'text-white' : 'text-slate-500'}`} />
+                  <span>Subscription</span>
+                </div>
+                {tenant?.subscription?.status === 'expiring_soon' && (
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
+                    {tenant.subscription.daysRemaining}d
+                  </span>
+                )}
+                {tenant?.subscription?.status === 'expired' && (
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300">
+                    Due
+                  </span>
+                )}
+              </button>
+
+              <button
                 onClick={() => { setActiveTab('settings'); setMobileMenuOpen(false); }}
                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                   activeTab === 'settings'
@@ -4912,7 +5526,7 @@ export default function Dashboard() {
             <div className="flex items-center justify-between text-[10px]">
               <span className="text-slate-400 font-medium">{tenant?.plan || 'DEMO'} Plan</span>
               <button
-                onClick={() => setShowUpgradeModal(true)}
+                onClick={() => setActiveTab('subscription')}
                 className="font-bold text-blue-600 hover:text-blue-700 hover:underline"
               >
                 Upgrade ↗
@@ -4967,28 +5581,374 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center gap-2 sm:gap-3">
-              {/* Search Bar */}
-              <div className="relative hidden md:block">
-                <input
-                  type="text"
-                  placeholder="Search..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className={`w-40 lg:w-56 pl-8 pr-3 py-1.5 text-xs rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500 transition ${
-                    darkMode
-                      ? 'bg-slate-800 border-slate-700 text-slate-200 placeholder-slate-500'
-                      : 'bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400'
-                  }`}
-                />
-                <svg
-                  className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5 pointer-events-none"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  viewBox="0 0 24 24"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
+              {/* Global Omnisearch Bar */}
+              <div ref={searchContainerRef} className="relative">
+                <div className="relative">
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    placeholder="Search anything... (Ctrl+K)"
+                    value={searchQuery}
+                    onFocus={() => {
+                      if (searchQuery.trim().length > 0) setSearchDropdownOpen(true);
+                    }}
+                    onChange={(e) => handleTopnavSearchChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        if (topFirstSearchResult) {
+                          topFirstSearchResult();
+                        }
+                      } else if (e.key === 'Escape') {
+                        setSearchDropdownOpen(false);
+                      }
+                    }}
+                    className={`w-32 xs:w-44 sm:w-56 md:w-64 lg:w-80 pl-8 pr-7 py-1.5 text-xs rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500 transition shadow-xs ${
+                      darkMode
+                        ? 'bg-slate-800 border-slate-700 text-slate-200 placeholder-slate-500'
+                        : 'bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400'
+                    }`}
+                  />
+                  <svg
+                    className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5 pointer-events-none"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+
+                  {/* Clear Button */}
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={handleClearTopnavSearch}
+                      className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 w-4 h-4 flex items-center justify-center rounded-full text-xs font-bold"
+                      title="Clear search"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                {/* Omnisearch Results Dropdown */}
+                {searchDropdownOpen && searchQuery.trim().length > 0 && (
+                  <div className="absolute right-0 sm:left-0 top-full mt-2 w-80 sm:w-96 md:w-[480px] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 z-[100] overflow-hidden max-h-[80vh] flex flex-col animate-in fade-in zoom-in-95 duration-150">
+                    {/* Header */}
+                    <div className="p-3 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+                      <span className="font-semibold">
+                        Found <span className="text-blue-600 font-bold">{totalSearchResults}</span> result{totalSearchResults === 1 ? '' : 's'} for &ldquo;{searchQuery}&rdquo;
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleClearTopnavSearch}
+                        className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 font-bold text-[11px]"
+                      >
+                        Clear
+                      </button>
+                    </div>
+
+                    {/* Scrollable Results List */}
+                    <div className="overflow-y-auto max-h-[60vh] divide-y divide-slate-100 dark:divide-slate-800">
+                      {/* Empty State */}
+                      {totalSearchResults === 0 && (
+                        <div className="p-6 text-center">
+                          <div className="text-3xl mb-2">🔍</div>
+                          <p className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                            No matches found for &ldquo;{searchQuery}&rdquo;
+                          </p>
+                          <p className="text-[11px] text-slate-400 mt-1 max-w-xs mx-auto">
+                            Try searching for student names, IDs, teachers, classes, invoice numbers, or modules.
+                          </p>
+                          <div className="mt-4 flex flex-wrap justify-center gap-1.5 text-xs">
+                            <button
+                              type="button"
+                              onClick={() => { setActiveTab('students'); setSearchDropdownOpen(false); }}
+                              className="px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 text-[11px] font-semibold hover:bg-blue-100"
+                            >
+                              🎓 Open Students
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setActiveTab('teachers'); setSearchDropdownOpen(false); }}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 text-[11px] font-semibold hover:bg-emerald-100"
+                            >
+                              👨‍🏫 Open Teachers
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setActiveTab('billing'); setSearchDropdownOpen(false); }}
+                              className="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 text-[11px] font-semibold hover:bg-amber-100"
+                            >
+                              🧾 Open Billing
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 1. STUDENTS */}
+                      {matchedStudents.length > 0 && (
+                        <div className="p-2">
+                          <div className="px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                            <span>🎓 Students ({matchedStudents.length})</span>
+                            <span className="text-blue-600 font-semibold">Jump to Student →</span>
+                          </div>
+                          {matchedStudents.map((s) => (
+                            <button
+                              key={s.id}
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('students');
+                                setSearchQuery(`${s.firstName} ${s.lastName}`);
+                                setSearchDropdownOpen(false);
+                              }}
+                              className="w-full text-left px-3 py-2 rounded-xl hover:bg-blue-50/80 dark:hover:bg-slate-800 transition flex items-center justify-between group"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 font-bold text-xs flex items-center justify-center shrink-0">
+                                  {s.firstName?.[0] || 'S'}
+                                </div>
+                                <div className="truncate">
+                                  <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-blue-600 truncate">
+                                    {s.firstName} {s.lastName}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                    ID: <span className="font-mono">{s.studentId}</span>
+                                    {s.class?.name ? ` • ${s.class.name}` : ''}
+                                    {s.guardianName ? ` • Guardian: ${s.guardianName}` : ''}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-xs text-slate-300 group-hover:text-blue-600 shrink-0 ml-2">
+                                →
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 2. TEACHERS */}
+                      {matchedTeachers.length > 0 && (
+                        <div className="p-2">
+                          <div className="px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                            <span>👨‍🏫 Teachers &amp; Faculty ({matchedTeachers.length})</span>
+                            <span className="text-blue-600 font-semibold">Jump to Teacher →</span>
+                          </div>
+                          {matchedTeachers.map((t) => (
+                            <button
+                              key={t.id}
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('teachers');
+                                setTeacherSearchQuery(`${t.firstName} ${t.lastName}`);
+                                setSearchDropdownOpen(false);
+                              }}
+                              className="w-full text-left px-3 py-2 rounded-xl hover:bg-emerald-50/80 dark:hover:bg-slate-800 transition flex items-center justify-between group"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 font-bold text-xs flex items-center justify-center shrink-0">
+                                  {t.firstName?.[0] || 'T'}
+                                </div>
+                                <div className="truncate">
+                                  <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-emerald-600 truncate">
+                                    {t.firstName} {t.lastName}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                    ID: <span className="font-mono">{t.teacherId}</span>
+                                    {t.className ? ` • Class: ${t.className}` : ' • General Faculty'}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-xs text-slate-300 group-hover:text-emerald-600 shrink-0 ml-2">
+                                →
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 3. CLASSES */}
+                      {matchedClasses.length > 0 && (
+                        <div className="p-2">
+                          <div className="px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                            <span>🏫 Classes &amp; Streams ({matchedClasses.length})</span>
+                            <span className="text-blue-600 font-semibold">Jump to Class →</span>
+                          </div>
+                          {matchedClasses.map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('classes');
+                                setClassSearchQuery(c.name);
+                                setSearchDropdownOpen(false);
+                              }}
+                              className="w-full text-left px-3 py-2 rounded-xl hover:bg-purple-50/80 dark:hover:bg-slate-800 transition flex items-center justify-between group"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-lg bg-purple-100 text-purple-700 font-bold text-xs flex items-center justify-center shrink-0">
+                                  🏫
+                                </div>
+                                <div className="truncate">
+                                  <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-purple-600 truncate">
+                                    {c.name}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                    Teacher: {c.classTeacher?.fullName || 'Unassigned'}{c._count?.students !== undefined ? ` • ${c._count.students} Students` : ''}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-xs text-slate-300 group-hover:text-purple-600 shrink-0 ml-2">
+                                →
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 4. INVOICES */}
+                      {matchedInvoices.length > 0 && (
+                        <div className="p-2">
+                          <div className="px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                            <span>🧾 Invoices &amp; Billing ({matchedInvoices.length})</span>
+                            <span className="text-blue-600 font-semibold">Jump to Invoice →</span>
+                          </div>
+                          {matchedInvoices.map((inv) => (
+                            <button
+                              key={inv.id}
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('billing');
+                                setInvoiceSearchQuery(inv.invoiceNumber || inv.id);
+                                setSearchDropdownOpen(false);
+                              }}
+                              className="w-full text-left px-3 py-2 rounded-xl hover:bg-amber-50/80 dark:hover:bg-slate-800 transition flex items-center justify-between group"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-lg bg-amber-100 text-amber-700 font-bold text-xs flex items-center justify-center shrink-0">
+                                  🧾
+                                </div>
+                                <div className="truncate">
+                                  <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-amber-600 truncate">
+                                    Invoice #{inv.invoiceNumber || inv.id.slice(0, 8)}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                    {inv.student ? `${inv.student.firstName} ${inv.student.lastName}` : 'Student'} • GHS {inv.totalAmount || 0} •{' '}
+                                    <span className={inv.status === 'PAID' ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
+                                      {inv.status || 'UNPAID'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-xs text-slate-300 group-hover:text-amber-600 shrink-0 ml-2">
+                                →
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 5. SUBJECTS */}
+                      {matchedSubjects.length > 0 && (
+                        <div className="p-2">
+                          <div className="px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                            <span>📚 Subjects ({matchedSubjects.length})</span>
+                            <span className="text-blue-600 font-semibold">Jump to Subject →</span>
+                          </div>
+                          {matchedSubjects.map((s) => (
+                            <button
+                              key={s.id}
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('subjects');
+                                setSubjectSearchQuery(s.name);
+                                setSearchDropdownOpen(false);
+                              }}
+                              className="w-full text-left px-3 py-2 rounded-xl hover:bg-indigo-50/80 dark:hover:bg-slate-800 transition flex items-center justify-between group"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-lg bg-indigo-100 text-indigo-700 font-bold text-xs flex items-center justify-center shrink-0">
+                                  📚
+                                </div>
+                                <div className="truncate">
+                                  <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-indigo-600 truncate">
+                                    {s.name}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                    Instructor: {s.instructorName || 'Unassigned'} • Semester: {s.semester || 'All'}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-xs text-slate-300 group-hover:text-indigo-600 shrink-0 ml-2">
+                                →
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 6. QUICK NAVIGATION */}
+                      {matchedPages.length > 0 && (
+                        <div className="p-2">
+                          <div className="px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                            <span>⚡ Quick Navigation ({matchedPages.length})</span>
+                            <span className="text-blue-600 font-semibold">Jump to Page →</span>
+                          </div>
+                          {matchedPages.map((p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => {
+                                setActiveTab(p.tab as any);
+                                if ((p as any).subTab) {
+                                  setSettingsActiveSubTab((p as any).subTab);
+                                }
+                                if ((p as any).action === 'terminal_report') {
+                                  setShowTerminalReportModal(true);
+                                }
+                                setSearchDropdownOpen(false);
+                              }}
+                              className="w-full text-left px-3 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition flex items-center justify-between group"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-xs flex items-center justify-center shrink-0">
+                                  {p.icon}
+                                </div>
+                                <div className="truncate">
+                                  <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-blue-600 truncate">
+                                    {p.name}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                    {p.desc}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-xs text-slate-300 group-hover:text-blue-600 shrink-0 ml-2">
+                                →
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Dropdown Footer with shortcuts */}
+                    <div className="px-4 py-2.5 bg-slate-50 dark:bg-slate-800/80 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+                      <span className="flex items-center gap-2">
+                        <span>Press <kbd className="px-1.5 py-0.5 rounded bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 font-mono text-[10px]">Enter</kbd> to jump</span>
+                        <span>•</span>
+                        <span><kbd className="px-1.5 py-0.5 rounded bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 font-mono text-[10px]">Esc</kbd> to close</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSearchDropdownOpen(false)}
+                        className="font-bold text-blue-600 hover:underline"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Dark Mode Toggle */}
@@ -5078,11 +6038,21 @@ export default function Dashboard() {
                     <button
                       onClick={() => {
                         setProfileDropdownOpen(false);
-                        setShowUpgradeModal(true);
+                        setActiveTab('subscription');
                       }}
-                      className="w-full text-left px-4 py-2 text-xs hover:bg-slate-500/10"
+                      className="w-full text-left px-4 py-2 text-xs hover:bg-slate-500/10 flex items-center justify-between"
                     >
-                      💳 Subscription Billing
+                      <span>💳 Subscription Billing</span>
+                      {tenant?.subscription?.status === 'expiring_soon' && (
+                        <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                          Due Soon
+                        </span>
+                      )}
+                      {tenant?.subscription?.status === 'expired' && (
+                        <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded border border-rose-200">
+                          Overdue
+                        </span>
+                      )}
                     </button>
 
                     <div className="border-t border-slate-100/10 my-1" />
@@ -5102,6 +6072,77 @@ export default function Dashboard() {
 
         {/* Content Area */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+          {/* TOAST / NOTICE BANNER */}
+          {subscriptionToast && (
+            <div className={`mb-6 p-4 rounded-2xl flex items-center justify-between gap-3 shadow-sm border ${
+              subscriptionToast.type === 'success'
+                ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                : subscriptionToast.type === 'error'
+                ? 'bg-rose-50 text-rose-900 border-rose-200'
+                : 'bg-blue-50 text-blue-900 border-blue-200'
+            }`}>
+              <div className="flex items-center gap-2.5 text-xs sm:text-sm font-semibold">
+                <span>{subscriptionToast.type === 'success' ? '🎉' : subscriptionToast.type === 'error' ? '⚠️' : 'ℹ️'}</span>
+                <span>{subscriptionToast.message}</span>
+              </div>
+              <button
+                onClick={() => setSubscriptionToast(null)}
+                className="text-slate-400 hover:text-slate-600 text-sm font-bold px-2 py-0.5"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* SUBSCRIPTION DUE WARNING PROMPT BANNER (<= 7 DAYS) */}
+          {tenant?.subscription?.isExpiringSoon && !bannerDismissed && (
+            <div className="mb-6 rounded-2xl bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-amber-500/15 border-2 border-amber-400/60 p-4 sm:p-5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 animate-in fade-in slide-in-from-top-3">
+              <div className="flex items-start sm:items-center gap-3.5">
+                <div className="w-11 h-11 rounded-2xl bg-amber-500/20 text-amber-700 flex items-center justify-center shrink-0 text-2xl font-bold shadow-inner">
+                  ⏳
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-sm font-bold text-amber-950">
+                      Subscription Renewal Due in {tenant.subscription.daysRemaining} Day{tenant.subscription.daysRemaining === 1 ? '' : 's'}
+                    </h4>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-200 text-amber-900 border border-amber-300 uppercase tracking-wider">
+                      Action Required
+                    </span>
+                  </div>
+                  <p className="text-xs text-amber-900/90 mt-1">
+                    Your school's <strong>{tenant.plan || 'School'} Plan</strong> subscription will expire on{' '}
+                    <strong>
+                      {tenant.subscription.currentPeriodEnd
+                        ? new Date(tenant.subscription.currentPeriodEnd).toLocaleDateString('en-GB', {
+                            day: 'numeric',
+                            month: 'long',
+                            year: 'numeric',
+                          })
+                        : 'soon'}
+                    </strong>
+                    . Renew today to keep your student report cards, fees collection, and parent portal uninterrupted.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 self-end md:self-center">
+                <button
+                  onClick={() => setActiveTab('subscription')}
+                  className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 active:scale-95 text-white text-xs font-bold shadow-sm transition flex items-center gap-1.5"
+                >
+                  <span>💳 Renew / Upgrade Now</span>
+                </button>
+                <button
+                  onClick={() => setBannerDismissed(true)}
+                  className="px-3 py-2.5 rounded-xl bg-white/80 hover:bg-white text-slate-600 hover:text-slate-900 text-xs font-semibold border border-amber-300 transition"
+                  title="Dismiss notice for this session"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* TAB 1: OVERVIEW */}
           {activeTab === 'overview' && (
             <div className="space-y-6">
@@ -6446,6 +7487,19 @@ export default function Dashboard() {
                 >
                   <span>🛡️</span> Audit Logs &amp; Activity
                 </button>
+                <button
+                  onClick={() => {
+                    setSettingsActiveSubTab('gateways');
+                    fetchGatewaySettings();
+                  }}
+                  className={`px-4 py-2.5 font-semibold text-xs rounded-t-xl transition whitespace-nowrap flex items-center gap-2 ${
+                    settingsActiveSubTab === 'gateways'
+                      ? 'bg-white border-t-2 border-x border-slate-200 text-blue-600 shadow-sm -mb-px'
+                      : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
+                  }`}
+                >
+                  <span>💳</span> Payment Gateways
+                </button>
               </div>
 
               {/* SUB-TAB 1: SCHOOL PROFILE & IDENTITY */}
@@ -6668,9 +7722,17 @@ export default function Dashboard() {
                       </div>
                       <div className="py-3 flex justify-between items-center text-xs">
                         <span className="font-semibold text-slate-600">Subscription Tier</span>
-                        <span className="px-2.5 py-0.5 rounded-full font-bold bg-blue-50 text-blue-700 border border-blue-200">
-                          {tenant?.plan || 'STANDARD'}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="px-2.5 py-0.5 rounded-full font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                            {tenant?.plan || 'DEMO'}
+                          </span>
+                          <button
+                            onClick={() => setActiveTab('subscription')}
+                            className="text-xs font-bold text-blue-600 hover:text-blue-800 hover:underline"
+                          >
+                            Manage / Upgrade ↗
+                          </button>
+                        </div>
                       </div>
                       <div className="py-3 space-y-2">
                         <div className="flex justify-between items-center text-xs">
@@ -7161,6 +8223,585 @@ export default function Dashboard() {
                         )}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+              )}
+
+              {/* SUB-TAB 6: PAYMENT GATEWAYS CONFIGURATION */}
+              {settingsActiveSubTab === 'gateways' && (
+                <div className="space-y-6">
+                  {/* Gateways Notice */}
+                  {gatewaysNotice && (
+                    <div
+                      className={`p-4 rounded-2xl flex items-center justify-between text-xs font-semibold ${
+                        gatewaysNotice.type === 'success'
+                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          : 'bg-rose-50 text-rose-800 border border-rose-200'
+                      }`}
+                    >
+                      <span>{gatewaysNotice.message}</span>
+                      <button
+                        onClick={() => setGatewaysNotice(null)}
+                        className="text-xs font-bold hover:underline opacity-70 hover:opacity-100"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Header & Global Config Banner */}
+                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-100">
+                      <div>
+                        <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                          <span>💳</span> Online Payment Gateway Integration
+                        </h2>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Configure live API credentials for Paystack, Flutterwave, and Stripe to accept online school fees, parent mobile money, and SaaS subscription auto-upgrades.
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={fetchGatewaySettings}
+                          disabled={gatewaysLoading}
+                          className="px-3.5 py-2 rounded-xl bg-slate-100 text-slate-700 text-xs font-semibold hover:bg-slate-200 transition flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          <span>🔄</span> {gatewaysLoading ? 'Loading...' : 'Reload Config'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSaveGatewaySettings}
+                          disabled={gatewaysSaving}
+                          className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold shadow-sm transition flex items-center gap-2 disabled:opacity-50"
+                        >
+                          {gatewaysSaving ? <span className="animate-spin">⚙️</span> : <span>💾</span>}
+                          <span>{gatewaysSaving ? 'Saving Settings...' : 'Save All Gateways'}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Global Gateway Preferences */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-5">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                          Primary Default Gateway
+                        </label>
+                        <select
+                          value={gatewaySettings.defaultGateway}
+                          onChange={(e) =>
+                            setGatewaySettings({
+                              ...gatewaySettings,
+                              defaultGateway: e.target.value as any,
+                            })
+                          }
+                          className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                        >
+                          <option value="paystack">Paystack (Recommended for Ghana MoMo &amp; Cards)</option>
+                          <option value="flutterwave">Flutterwave (Recommended for Pan-African MoMo &amp; Cards)</option>
+                          <option value="stripe">Stripe (Recommended for International Cards &amp; Apple Pay)</option>
+                          <option value="sandbox">Sandbox (Internal Testing &amp; Instant Simulation)</option>
+                        </select>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          Default payment provider preselected at checkout and paywall overlays.
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                          Platform Settlement Currency
+                        </label>
+                        <select
+                          value={gatewaySettings.currency}
+                          onChange={(e) =>
+                            setGatewaySettings({
+                              ...gatewaySettings,
+                              currency: e.target.value,
+                            })
+                          }
+                          className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                        >
+                          <option value="GHS">GHS — Ghanaian Cedi (GH₵)</option>
+                          <option value="USD">USD — US Dollar ($)</option>
+                          <option value="NGN">NGN — Nigerian Naira (₦)</option>
+                          <option value="KES">KES — Kenyan Shilling (KSh)</option>
+                          <option value="EUR">EUR — Euro (€)</option>
+                          <option value="GBP">GBP — British Pound (£)</option>
+                        </select>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          Default 3-letter ISO currency for online charges and billing invoices.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Webhook Endpoint Assistant */}
+                    <div className="mt-5 p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                          <span>🔔</span> Unified Webhook Notification URL
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          Paste this URL in your Paystack, Flutterwave, or Stripe dashboard under Webhooks for instant automated subscription activations:
+                        </p>
+                        <code className="inline-block mt-1 font-mono text-[11px] text-blue-700 bg-blue-50 px-2.5 py-1 rounded border border-blue-200 break-all select-all">
+                          {typeof window !== 'undefined' ? `${window.location.origin}/api/subscriptions/webhook` : 'https://your-domain.com/api/subscriptions/webhook'}
+                        </code>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleCopyWebhook}
+                        className="px-3.5 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-100 transition shrink-0 self-start sm:self-auto"
+                      >
+                        {copiedWebhook ? '✓ Copied URL!' : '📋 Copy URL'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Gateway Cards Grid */}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* 1. PAYSTACK */}
+                    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-200 flex items-center justify-center font-black text-sm">
+                              PS
+                            </div>
+                            <div>
+                              <h3 className="font-bold text-sm text-slate-900">Paystack</h3>
+                              <p className="text-[10px] text-slate-400">Ghana MoMo &amp; Cards</p>
+                            </div>
+                          </div>
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={gatewaySettings.paystack.enabled}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  paystack: { ...gatewaySettings.paystack, enabled: e.target.checked },
+                                })
+                              }
+                              className="sr-only peer"
+                            />
+                            <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
+                          </label>
+                        </div>
+
+                        <div className="mt-4 space-y-3.5">
+                          {/* Mode Toggle */}
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-semibold text-slate-600">Mode</span>
+                            <div className="inline-flex p-0.5 bg-slate-100 rounded-lg border border-slate-200 text-[11px] font-bold">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setGatewaySettings({
+                                    ...gatewaySettings,
+                                    paystack: { ...gatewaySettings.paystack, mode: 'test' },
+                                  })
+                                }
+                                className={`px-2.5 py-1 rounded-md transition ${
+                                  gatewaySettings.paystack.mode === 'test'
+                                    ? 'bg-white text-slate-900 shadow-xs'
+                                    : 'text-slate-500'
+                                }`}
+                              >
+                                Test
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setGatewaySettings({
+                                    ...gatewaySettings,
+                                    paystack: { ...gatewaySettings.paystack, mode: 'live' },
+                                  })
+                                }
+                                className={`px-2.5 py-1 rounded-md transition ${
+                                  gatewaySettings.paystack.mode === 'live'
+                                    ? 'bg-emerald-600 text-white shadow-xs'
+                                    : 'text-slate-500'
+                                }`}
+                              >
+                                Live
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Public Key */}
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">
+                              Public Key
+                            </label>
+                            <input
+                              type="text"
+                              value={gatewaySettings.paystack.publicKey}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  paystack: { ...gatewaySettings.paystack, publicKey: e.target.value },
+                                })
+                              }
+                              placeholder="pk_test_... or pk_live_..."
+                              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+
+                          {/* Secret Key */}
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="block text-xs font-semibold text-slate-700">
+                                Secret Key
+                              </label>
+                              {gatewaySettings.paystack.hasSecretKey && (
+                                <span className="text-[10px] font-bold text-emerald-600">✓ Key Configured</span>
+                              )}
+                            </div>
+                            <input
+                              type="text"
+                              value={gatewaySettings.paystack.secretKey}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  paystack: { ...gatewaySettings.paystack, secretKey: e.target.value },
+                                })
+                              }
+                              placeholder={
+                                gatewaySettings.paystack.hasSecretKey
+                                  ? '•••••••••••••••• (Leave blank to keep current)'
+                                  : 'sk_test_... or sk_live_...'
+                              }
+                              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              Leave masked bullet value to retain your existing saved key.
+                            </p>
+                          </div>
+
+                          {/* Supported Channels */}
+                          <div className="pt-2">
+                            <span className="block text-xs font-semibold text-slate-700 mb-1.5">
+                              Enabled Channels
+                            </span>
+                            <div className="flex flex-wrap gap-2 text-[11px] text-slate-600">
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-medium">
+                                📱 Mobile Money (MTN, Telecel, AT)
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-medium">
+                                💳 Visa &amp; Mastercard
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 2. FLUTTERWAVE */}
+                    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 rounded-xl bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center font-black text-sm">
+                              FL
+                            </div>
+                            <div>
+                              <h3 className="font-bold text-sm text-slate-900">Flutterwave</h3>
+                              <p className="text-[10px] text-slate-400">Pan-African MoMo &amp; Cards</p>
+                            </div>
+                          </div>
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={gatewaySettings.flutterwave.enabled}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  flutterwave: { ...gatewaySettings.flutterwave, enabled: e.target.checked },
+                                })
+                              }
+                              className="sr-only peer"
+                            />
+                            <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-600"></div>
+                          </label>
+                        </div>
+
+                        <div className="mt-4 space-y-3.5">
+                          {/* Mode Toggle */}
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-semibold text-slate-600">Mode</span>
+                            <div className="inline-flex p-0.5 bg-slate-100 rounded-lg border border-slate-200 text-[11px] font-bold">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setGatewaySettings({
+                                    ...gatewaySettings,
+                                    flutterwave: { ...gatewaySettings.flutterwave, mode: 'test' },
+                                  })
+                                }
+                                className={`px-2.5 py-1 rounded-md transition ${
+                                  gatewaySettings.flutterwave.mode === 'test'
+                                    ? 'bg-white text-slate-900 shadow-xs'
+                                    : 'text-slate-500'
+                                }`}
+                              >
+                                Test
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setGatewaySettings({
+                                    ...gatewaySettings,
+                                    flutterwave: { ...gatewaySettings.flutterwave, mode: 'live' },
+                                  })
+                                }
+                                className={`px-2.5 py-1 rounded-md transition ${
+                                  gatewaySettings.flutterwave.mode === 'live'
+                                    ? 'bg-amber-600 text-white shadow-xs'
+                                    : 'text-slate-500'
+                                }`}
+                              >
+                                Live
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Public Key */}
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">
+                              Public Key
+                            </label>
+                            <input
+                              type="text"
+                              value={gatewaySettings.flutterwave.publicKey}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  flutterwave: { ...gatewaySettings.flutterwave, publicKey: e.target.value },
+                                })
+                              }
+                              placeholder="FLWPUBK_TEST-... or FLWPUBK-..."
+                              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
+                            />
+                          </div>
+
+                          {/* Secret Key */}
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="block text-xs font-semibold text-slate-700">
+                                Secret Key
+                              </label>
+                              {gatewaySettings.flutterwave.hasSecretKey && (
+                                <span className="text-[10px] font-bold text-amber-600">✓ Key Configured</span>
+                              )}
+                            </div>
+                            <input
+                              type="text"
+                              value={gatewaySettings.flutterwave.secretKey}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  flutterwave: { ...gatewaySettings.flutterwave, secretKey: e.target.value },
+                                })
+                              }
+                              placeholder={
+                                gatewaySettings.flutterwave.hasSecretKey
+                                  ? '•••••••••••••••• (Leave blank to keep current)'
+                                  : 'FLWSECK_TEST-... or FLWSECK-...'
+                              }
+                              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
+                            />
+                          </div>
+
+                          {/* Encryption Key */}
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">
+                              Encryption Key (Optional)
+                            </label>
+                            <input
+                              type="text"
+                              value={gatewaySettings.flutterwave.encryptionKey || ''}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  flutterwave: { ...gatewaySettings.flutterwave, encryptionKey: e.target.value },
+                                })
+                              }
+                              placeholder="FLWSECK_TEST_... or hash"
+                              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
+                            />
+                          </div>
+
+                          {/* Channels */}
+                          <div className="pt-2">
+                            <span className="block text-xs font-semibold text-slate-700 mb-1.5">
+                              Supported Channels
+                            </span>
+                            <div className="flex flex-wrap gap-2 text-[11px] text-slate-600">
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-medium">
+                                🇬🇭 Ghana MoMo
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-medium">
+                                🇳🇬 Bank Transfer &amp; USSD
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-medium">
+                                💳 Pan-African Debit Cards
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 3. STRIPE */}
+                    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-200 flex items-center justify-center font-black text-sm">
+                              ST
+                            </div>
+                            <div>
+                              <h3 className="font-bold text-sm text-slate-900">Stripe</h3>
+                              <p className="text-[10px] text-slate-400">Global Cards &amp; Apple Pay</p>
+                            </div>
+                          </div>
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={gatewaySettings.stripe.enabled}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  stripe: { ...gatewaySettings.stripe, enabled: e.target.checked },
+                                })
+                              }
+                              className="sr-only peer"
+                            />
+                            <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                          </label>
+                        </div>
+
+                        <div className="mt-4 space-y-3.5">
+                          {/* Mode Toggle */}
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-semibold text-slate-600">Mode</span>
+                            <div className="inline-flex p-0.5 bg-slate-100 rounded-lg border border-slate-200 text-[11px] font-bold">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setGatewaySettings({
+                                    ...gatewaySettings,
+                                    stripe: { ...gatewaySettings.stripe, mode: 'test' },
+                                  })
+                                }
+                                className={`px-2.5 py-1 rounded-md transition ${
+                                  gatewaySettings.stripe.mode === 'test'
+                                    ? 'bg-white text-slate-900 shadow-xs'
+                                    : 'text-slate-500'
+                                }`}
+                              >
+                                Test
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setGatewaySettings({
+                                    ...gatewaySettings,
+                                    stripe: { ...gatewaySettings.stripe, mode: 'live' },
+                                  })
+                                }
+                                className={`px-2.5 py-1 rounded-md transition ${
+                                  gatewaySettings.stripe.mode === 'live'
+                                    ? 'bg-indigo-600 text-white shadow-xs'
+                                    : 'text-slate-500'
+                                }`}
+                              >
+                                Live
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Publishable Key */}
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">
+                              Publishable Key
+                            </label>
+                            <input
+                              type="text"
+                              value={gatewaySettings.stripe.publicKey}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  stripe: { ...gatewaySettings.stripe, publicKey: e.target.value },
+                                })
+                              }
+                              placeholder="pk_test_... or pk_live_..."
+                              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+
+                          {/* Secret Key */}
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="block text-xs font-semibold text-slate-700">
+                                Secret Key
+                              </label>
+                              {gatewaySettings.stripe.hasSecretKey && (
+                                <span className="text-[10px] font-bold text-indigo-600">✓ Key Configured</span>
+                              )}
+                            </div>
+                            <input
+                              type="text"
+                              value={gatewaySettings.stripe.secretKey}
+                              onChange={(e) =>
+                                setGatewaySettings({
+                                  ...gatewaySettings,
+                                  stripe: { ...gatewaySettings.stripe, secretKey: e.target.value },
+                                })
+                              }
+                              placeholder={
+                                gatewaySettings.stripe.hasSecretKey
+                                  ? '•••••••••••••••• (Leave blank to keep current)'
+                                  : 'sk_test_... or sk_live_...'
+                              }
+                              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+
+                          {/* Channels */}
+                          <div className="pt-2">
+                            <span className="block text-xs font-semibold text-slate-700 mb-1.5">
+                              Supported Channels
+                            </span>
+                            <div className="flex flex-wrap gap-2 text-[11px] text-slate-600">
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-medium">
+                                💳 Global Visa, Mastercard, AMEX
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-medium">
+                                🍎 Apple Pay &amp; Google Pay
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Bottom Save Action */}
+                  <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <p className="text-xs text-slate-500">
+                      Settings are instantly synchronized across all student invoice payment buttons and school plan checkout flows.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleSaveGatewaySettings}
+                      disabled={gatewaysSaving}
+                      className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold shadow-sm transition flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {gatewaysSaving ? <span className="animate-spin">⚙️</span> : <span>💾</span>}
+                      <span>{gatewaysSaving ? 'Saving Configurations...' : 'Save Payment Gateways'}</span>
+                    </button>
                   </div>
                 </div>
               )}
@@ -13364,6 +15005,518 @@ export default function Dashboard() {
             </div>
           )}
 
+          {/* TAB: SUBSCRIPTION & BILLING */}
+          {activeTab === 'subscription' && (
+            <div className="space-y-8 animate-in fade-in duration-200">
+              {/* Top Title & Refresh */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h1 className="text-2xl font-black text-slate-900">Subscription &amp; Licensing</h1>
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
+                      Multi-Tenant SaaS
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Manage student enrollment capacity, license renewals, MoMo billing, and payment receipts for <strong>{tenant?.name || 'your school'}</strong>.
+                  </p>
+                </div>
+                <button
+                  onClick={fetchSubscriptionData}
+                  disabled={subscriptionLoading}
+                  className="px-4 py-2 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold shadow-sm transition flex items-center gap-1.5 self-start sm:self-auto"
+                >
+                  <span className={subscriptionLoading ? 'animate-spin' : ''}>🔄</span>
+                  <span>{subscriptionLoading ? 'Refreshing...' : 'Refresh Status'}</span>
+                </button>
+              </div>
+
+              {/* Current Active Plan Status Banner */}
+              <div className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-800 to-blue-950 text-white p-6 sm:p-8 shadow-xl relative overflow-hidden">
+                <div className="absolute right-0 top-0 translate-x-8 -translate-y-8 w-64 h-64 bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
+                <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <span className="text-3xl">🛡️</span>
+                      <div>
+                        <div className="flex items-center gap-2.5">
+                          <h2 className="text-xl sm:text-2xl font-black tracking-tight">
+                            {subscriptionData?.currentSubscription?.plan || tenant?.plan || 'DEMO'} TIER
+                          </h2>
+                          {tenant?.subscription?.status === 'active' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 uppercase tracking-wider">
+                              ● Active License
+                            </span>
+                          )}
+                          {tenant?.subscription?.status === 'expiring_soon' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-amber-500/20 text-amber-400 border border-amber-500/30 uppercase tracking-wider animate-pulse">
+                              ⏳ Due in {tenant?.subscription?.daysRemaining} Day{tenant?.subscription?.daysRemaining === 1 ? '' : 's'}
+                            </span>
+                          )}
+                          {tenant?.subscription?.status === 'expired' && (
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-rose-500/20 text-rose-400 border border-rose-500/30 uppercase tracking-wider">
+                              ● Overdue / Locked
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-300 mt-1">
+                          Tenant ID: <span className="font-mono text-blue-300">{tenant?.id}</span> • School Subdomain:{' '}
+                          <span className="font-mono text-blue-300">{tenant?.subdomain}.smsapp.com</span>
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Student capacity usage bar */}
+                    <div className="pt-2 max-w-md">
+                      <div className="flex justify-between text-xs text-slate-300 mb-1.5 font-medium">
+                        <span>Student Capacity</span>
+                        <span className="font-bold text-white">
+                          {subscriptionData?.usage?.studentCount ?? students.length} / {subscriptionData?.usage?.studentLimit ?? tenant?.studentLimit ?? 15} Students
+                          ({subscriptionData?.usage?.quotaPercentage ?? (tenant?.studentLimit ? Math.round((students.length / tenant.studentLimit) * 100) : 0)}%)
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-700/60 rounded-full h-2.5 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${
+                            (subscriptionData?.usage?.quotaPercentage ?? 0) >= 90
+                              ? 'bg-rose-500'
+                              : (subscriptionData?.usage?.quotaPercentage ?? 0) >= 70
+                              ? 'bg-amber-400'
+                              : 'bg-blue-400'
+                          }`}
+                          style={{
+                            width: `${Math.min(subscriptionData?.usage?.quotaPercentage ?? 0, 100)}%`,
+                          }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[11px] text-slate-400 mt-1.5">
+                        <span>Remaining slots: <strong>{subscriptionData?.usage?.remainingSlots ?? Math.max(0, (tenant?.studentLimit || 15) - students.length)}</strong></span>
+                        <span>Billing cycle: <strong className="capitalize">{subscriptionData?.currentSubscription?.billingCycle || 'Monthly'}</strong></span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Status metrics grid */}
+                  <div className="grid grid-cols-2 gap-3 sm:gap-4 shrink-0 bg-white/5 border border-white/10 rounded-2xl p-4 sm:p-5 backdrop-blur-sm">
+                    <div>
+                      <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Renewal Due</div>
+                      <div className="text-sm sm:text-base font-bold text-white mt-0.5">
+                        {tenant?.subscription?.currentPeriodEnd
+                          ? new Date(tenant.subscription.currentPeriodEnd).toLocaleDateString('en-GB', {
+                              day: 'numeric',
+                              month: 'short',
+                              year: 'numeric',
+                            })
+                          : 'In 14 Days'}
+                      </div>
+                      <div className="text-[11px] text-blue-300">
+                        {tenant?.subscription?.daysRemaining !== undefined
+                          ? tenant.subscription.daysRemaining > 0
+                            ? `${tenant.subscription.daysRemaining} days left`
+                            : 'Expired'
+                          : 'Trial Active'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Plan Rate</div>
+                      <div className="text-sm sm:text-base font-bold text-white mt-0.5">
+                        {tenant?.currency || 'GHS'} {subscriptionData?.currentSubscription?.amount !== undefined ? Number(subscriptionData.currentSubscription.amount).toFixed(2) : '0.00'}
+                      </div>
+                      <div className="text-[11px] text-slate-400 capitalize">
+                        {subscriptionData?.currentSubscription?.billingCycle || 'Trial'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* LIVE SIMULATION / TESTING TOOLBAR (ADMIN TOOLS) */}
+              <div className="rounded-2xl border border-indigo-100 bg-gradient-to-r from-indigo-50/60 via-purple-50/40 to-blue-50/60 p-4 sm:p-5 shadow-sm">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🧪</span>
+                    <div>
+                      <h3 className="text-xs sm:text-sm font-bold text-indigo-950">
+                        Interactive Subscription Status Testing (Admin Sandbox)
+                      </h3>
+                      <p className="text-[11px] text-indigo-700">
+                        Test the real-time prompt warnings and overdue screen lock behavior instantly.
+                      </p>
+                    </div>
+                  </div>
+                  {simulationLoading && (
+                    <span className="text-xs font-semibold text-indigo-600 animate-pulse flex items-center gap-1">
+                      <span>⚙️ Updating state...</span>
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2.5">
+                  <button
+                    onClick={() => handleSimulateStatus('set_expiring')}
+                    disabled={simulationLoading}
+                    className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5"
+                    title="Simulates 3 days remaining before expiration to trigger the due warning prompt"
+                  >
+                    <span>⏳ Test "Due Soon" (3 Days Left)</span>
+                  </button>
+                  <button
+                    onClick={() => handleSimulateStatus('set_expired')}
+                    disabled={simulationLoading}
+                    className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5"
+                    title="Simulates an expired subscription to trigger the impenetrable screen lock"
+                  >
+                    <span>🔒 Test "Overdue Lock" (Expired)</span>
+                  </button>
+                  <button
+                    onClick={() => handleSimulateStatus('set_active')}
+                    disabled={simulationLoading}
+                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition active:scale-95 flex items-center gap-1.5"
+                    title="Restores subscription to active state with 30 days remaining"
+                  >
+                    <span>✅ Restore "Active" (30 Days)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Billing Cycle Switcher & Plan Catalog */}
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-lg font-black text-slate-900">Available School Subscription Tiers</h2>
+                    <p className="text-xs text-slate-500">
+                      All tiers include full Ghanaian GES grading, marks recording, and mobile money invoicing.
+                    </p>
+                  </div>
+
+                  {/* Billing Cycle Toggle */}
+                  <div className="inline-flex p-1 bg-slate-100 rounded-2xl border border-slate-200 self-start sm:self-auto">
+                    <button
+                      onClick={() => setBillingCycle('monthly')}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-xl transition ${
+                        billingCycle === 'monthly'
+                          ? 'bg-white text-slate-900 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Monthly
+                    </button>
+                    <button
+                      onClick={() => setBillingCycle('termly')}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-xl transition flex items-center gap-1 ${
+                        billingCycle === 'termly'
+                          ? 'bg-white text-blue-600 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <span>Termly (4 Mo)</span>
+                      <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-blue-100 text-blue-700">
+                        -10%
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setBillingCycle('annual')}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-xl transition flex items-center gap-1 ${
+                        billingCycle === 'annual'
+                          ? 'bg-white text-emerald-600 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <span>Annual (12 Mo)</span>
+                      <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-emerald-100 text-emerald-700">
+                        -20%
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Online Payment Gateway Selector Bar */}
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 bg-gradient-to-r from-blue-50/70 via-indigo-50/50 to-slate-50 rounded-2xl border border-blue-100 shadow-sm">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-sm shadow-sm">
+                      💳
+                    </div>
+                    <div>
+                      <h3 className="text-xs font-bold text-slate-900">Select Online Payment Gateway</h3>
+                      <p className="text-[11px] text-slate-500">
+                        Choose your preferred payment method. System automatically upgrades school quotas upon successful payment.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      { id: 'paystack', name: 'Paystack', desc: 'Ghana MoMo & Cards', icon: '🟢' },
+                      { id: 'flutterwave', name: 'Flutterwave', desc: 'Pan-Africa & MoMo', icon: '🟠' },
+                      { id: 'stripe', name: 'Stripe', desc: 'Cards & Apple Pay', icon: '🟣' },
+                      { id: 'sandbox', name: 'Instant Sandbox', desc: 'Demo Mode', icon: '⚡' },
+                    ].map((gw) => {
+                      const isSelected = selectedCheckoutGateway === gw.id;
+                      return (
+                        <button
+                          key={gw.id}
+                          type="button"
+                          onClick={() => setSelectedCheckoutGateway(gw.id as any)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border ${
+                            isSelected
+                              ? 'bg-white text-blue-700 border-blue-500 ring-2 ring-blue-500/20 shadow-sm'
+                              : 'bg-white/80 text-slate-600 border-slate-200 hover:bg-white hover:text-slate-900'
+                          }`}
+                        >
+                          <span>{gw.icon}</span>
+                          <span>{gw.name}</span>
+                          <span
+                            className={`text-[9px] px-1.5 py-0.5 rounded-md font-semibold ${
+                              isSelected ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'
+                            }`}
+                          >
+                            {gw.desc}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Plans Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+                  {(subscriptionData?.plans || Object.values(SUBSCRIPTION_PLANS))
+                    .filter((p) => p.key !== 'DEMO')
+                    .map((plan) => {
+                      const isCurrent = (tenant?.plan || 'DEMO') === plan.key;
+                      const price =
+                        billingCycle === 'annual'
+                          ? plan.priceAnnual
+                          : billingCycle === 'termly'
+                          ? plan.priceTermly
+                          : plan.priceMonthly;
+
+                      return (
+                        <div
+                          key={plan.key}
+                          className={`rounded-2xl border flex flex-col justify-between p-5 transition-all ${
+                            isCurrent
+                              ? 'border-blue-600 bg-blue-50/30 ring-2 ring-blue-500/20 shadow-md'
+                              : plan.popular
+                              ? 'border-indigo-400 bg-white ring-1 ring-indigo-300 shadow-sm hover:shadow-md'
+                              : 'border-slate-200 bg-white hover:border-slate-300 shadow-sm'
+                          }`}
+                        >
+                          <div>
+                            {plan.popular && (
+                              <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-600 text-white uppercase tracking-wider mb-2">
+                                MOST POPULAR
+                              </span>
+                            )}
+                            {isCurrent && (
+                              <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-black bg-blue-600 text-white uppercase tracking-wider mb-2">
+                                CURRENT PLAN
+                              </span>
+                            )}
+                            <h3 className="font-black text-base text-slate-900">{plan.name}</h3>
+                            <div className="mt-1 text-xs font-bold text-blue-600">
+                              Up to {plan.studentLimit} Students
+                            </div>
+                            <p className="text-[11px] text-slate-500 mt-1 min-h-[32px] line-clamp-2">
+                              {plan.description}
+                            </p>
+
+                            <div className="mt-4 pt-3 border-t border-slate-100">
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-slate-900">
+                                  {tenant?.currency || 'GHS'} {price}
+                                </span>
+                                <span className="text-xs text-slate-500 font-medium">
+                                  /{billingCycle === 'annual' ? 'yr' : billingCycle === 'termly' ? 'term' : 'mo'}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Features list */}
+                            <ul className="mt-4 space-y-2 text-[11px] text-slate-600">
+                              {plan.features.map((feat, idx) => (
+                                <li key={idx} className="flex items-start gap-1.5">
+                                  <span className="text-emerald-500 font-bold shrink-0">✓</span>
+                                  <span>{feat}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+
+                          <div className="mt-6 pt-3 border-t border-slate-100 space-y-2">
+                            <button
+                              onClick={() =>
+                                handleInitiateCheckout(
+                                  plan.key,
+                                  billingCycle,
+                                  selectedCheckoutGateway === 'sandbox',
+                                  selectedCheckoutGateway
+                                )
+                              }
+                              disabled={checkoutLoading}
+                              className={`w-full py-2.5 rounded-xl text-xs font-bold shadow-sm transition active:scale-95 flex items-center justify-center gap-1.5 ${
+                                isCurrent
+                                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                                  : 'bg-slate-900 hover:bg-black text-white'
+                              }`}
+                            >
+                              {checkoutLoading && selectedCheckoutPlan === plan.key ? (
+                                <span className="animate-spin">⚙️</span>
+                              ) : (
+                                <span>💳</span>
+                              )}
+                              <span>
+                                {selectedCheckoutGateway === 'sandbox'
+                                  ? `Instant Sandbox: ${plan.name.replace(' Plan', '')}`
+                                  : isCurrent
+                                  ? `Renew via ${selectedCheckoutGateway === 'paystack' ? 'Paystack' : selectedCheckoutGateway === 'flutterwave' ? 'Flutterwave' : 'Stripe'}`
+                                  : `Pay via ${selectedCheckoutGateway === 'paystack' ? 'Paystack' : selectedCheckoutGateway === 'flutterwave' ? 'Flutterwave' : 'Stripe'}`}
+                              </span>
+                            </button>
+
+                            {/* Instant sandbox demo upgrade button */}
+                            {selectedCheckoutGateway !== 'sandbox' && (
+                              <button
+                                onClick={() => handleInitiateCheckout(plan.key, billingCycle, true, 'sandbox')}
+                                disabled={checkoutLoading}
+                                className="w-full py-1.5 rounded-lg text-[10px] font-bold text-indigo-700 hover:bg-indigo-50 border border-indigo-200 transition"
+                                title="Instant upgrade without live payment gateway (Sandbox mode)"
+                              >
+                                ⚡ Instant Sandbox Demo
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+
+              {/* Payment & Billing History Table */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Payment &amp; Billing History</h3>
+                    <p className="text-xs text-slate-500">
+                      Download or view official payment receipts for accounting and school audit records.
+                    </p>
+                  </div>
+                  <span className="text-xs text-slate-400 font-medium">
+                    {subscriptionData?.history?.length || 0} Record(s) Found
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
+                      <tr>
+                        <th className="px-4 py-3 text-left">Receipt / Reference</th>
+                        <th className="px-4 py-3 text-left">Plan Tier</th>
+                        <th className="px-4 py-3 text-left">Billing Period</th>
+                        <th className="px-4 py-3 text-left">Cycle</th>
+                        <th className="px-4 py-3 text-right">Amount Paid</th>
+                        <th className="px-4 py-3 text-left">Gateway</th>
+                        <th className="px-4 py-3 text-center">Status</th>
+                        <th className="px-4 py-3 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {!subscriptionData?.history || subscriptionData.history.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="px-4 py-8 text-center text-slate-400">
+                            No subscription payment history yet. Subscriptions activated will appear here.
+                          </td>
+                        </tr>
+                      ) : (
+                        subscriptionData.history.map((sub) => (
+                          <tr key={sub.id} className="hover:bg-slate-50/60 transition">
+                            <td className="px-4 py-3 font-mono font-bold text-slate-800">
+                              {sub.gatewayReference || sub.id.slice(0, 12)}
+                            </td>
+                            <td className="px-4 py-3 font-bold text-slate-900">{sub.plan}</td>
+                            <td className="px-4 py-3 text-slate-600">
+                              {new Date(sub.currentPeriodStart).toLocaleDateString('en-GB', {
+                                day: 'numeric',
+                                month: 'short',
+                              })}{' '}
+                              -{' '}
+                              {new Date(sub.currentPeriodEnd).toLocaleDateString('en-GB', {
+                                day: 'numeric',
+                                month: 'short',
+                                year: 'numeric',
+                              })}
+                            </td>
+                            <td className="px-4 py-3 capitalize text-slate-600">{sub.billingCycle}</td>
+                            <td className="px-4 py-3 text-right font-black text-slate-900">
+                              {sub.currency} {Number(sub.amount).toFixed(2)}
+                            </td>
+                            <td className="px-4 py-3 uppercase font-mono text-[10px] text-slate-500">
+                              {sub.paymentGateway}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                  sub.status === 'active'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-slate-100 text-slate-600'
+                                }`}
+                              >
+                                {sub.status}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <button
+                                onClick={() => setReceiptModalSub(sub)}
+                                className="px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold transition"
+                              >
+                                🧾 Receipt
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Payment Methods & Support Info */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5">
+                  <h4 className="font-bold text-xs text-slate-900 uppercase tracking-wider mb-2">
+                    📱 Supported Payment Methods (Ghana)
+                  </h4>
+                  <ul className="space-y-1.5 text-xs text-slate-600">
+                    <li className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-amber-500" />
+                      <span><strong>MTN Mobile Money</strong> — Instant prompt on your registered SIM (*170#)</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-red-500" />
+                      <span><strong>Telecel Cash</strong> — Automated prompt and voucher support (*110#)</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-blue-500" />
+                      <span><strong>AT Money</strong> &amp; Ghanaian Bank Cards (Visa &amp; Mastercard)</span>
+                    </li>
+                  </ul>
+                </div>
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5">
+                  <h4 className="font-bold text-xs text-slate-900 uppercase tracking-wider mb-2">
+                    🤝 Enterprise &amp; Custom School Assistance
+                  </h4>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Have more than 2,000 students or manage multiple campuses under one board of governors?
+                    Contact our dedicated account desk for custom SLA agreements and direct bank transfer invoicing.
+                  </p>
+                  <div className="mt-3 flex items-center gap-4 text-xs font-bold text-blue-700">
+                    <span>📞 +233 (0) 50 123 4567</span>
+                    <span>💬 WhatsApp Available</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
         </main>
 
         {/* SAAS PLATFORM FOOTER MAINTAINED */}
@@ -13672,62 +15825,459 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* IMPORT STUDENTS MODAL */}
-      {showImportModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
+      {/* UPGRADE SUBSCRIPTION MODAL */}
+      {showUpgradeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl max-w-3xl w-full p-6 sm:p-8 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto animate-in zoom-in-95">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100">
               <div>
                 <h3 className="text-xl font-bold text-slate-900">Upgrade Your School Subscription</h3>
                 <p className="text-xs text-slate-500">Instant unlock of student caps with Mobile Money (MTN MoMo, Telecel) or Card.</p>
               </div>
               <button
                 onClick={() => setShowUpgradeModal(false)}
-                className="text-slate-400 hover:text-slate-600 text-lg"
+                className="text-slate-400 hover:text-slate-600 text-xl font-bold p-1"
               >
                 ✕
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 my-6">
+            {/* Gateway Selector in Modal */}
+            <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-slate-50 rounded-2xl border border-slate-200 mt-4 mb-2">
+              <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                <span>💳</span> Gateway:
+              </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  { id: 'paystack', name: 'Paystack', icon: '🟢' },
+                  { id: 'flutterwave', name: 'Flutterwave', icon: '🟠' },
+                  { id: 'stripe', name: 'Stripe', icon: '🟣' },
+                  { id: 'sandbox', name: 'Sandbox Demo', icon: '⚡' },
+                ].map((gw) => (
+                  <button
+                    key={gw.id}
+                    type="button"
+                    onClick={() => setSelectedCheckoutGateway(gw.id as any)}
+                    className={`px-2.5 py-1 rounded-xl text-[11px] font-bold border transition ${
+                      selectedCheckoutGateway === gw.id
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span>{gw.icon}</span> <span>{gw.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 my-4">
               {[
-                { name: 'Copper', students: '100 Students', price: 'GHS 150', interval: '/month' },
-                { name: 'Silver', students: '250 Students', price: 'GHS 300', interval: '/month', popular: true },
-                { name: 'Gold', students: '600 Students', price: 'GHS 600', interval: '/month' },
-              ].map((tier, i) => (
+                { key: 'COPPER', name: 'Copper', students: '100 Students', price: 'GHS 150', interval: '/month' },
+                { key: 'SILVER', name: 'Silver', students: '250 Students', price: 'GHS 300', interval: '/month', popular: true },
+                { key: 'GOLD', name: 'Gold', students: '600 Students', price: 'GHS 600', interval: '/month' },
+              ].map((tier) => (
                 <div
-                  key={i}
-                  className={`p-4 rounded-xl border flex flex-col justify-between ${
-                    tier.popular ? 'border-blue-500 bg-blue-50/40 ring-2 ring-blue-500/20' : 'border-slate-200 bg-white'
+                  key={tier.key}
+                  className={`p-5 rounded-2xl border flex flex-col justify-between ${
+                    tier.popular
+                      ? 'border-blue-500 bg-blue-50/40 ring-2 ring-blue-500/20 shadow-md'
+                      : 'border-slate-200 bg-white shadow-sm'
                   }`}
                 >
                   <div>
                     {tier.popular && (
-                      <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-blue-600 text-white mb-2">
+                      <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-black bg-blue-600 text-white mb-2">
                         MOST POPULAR
                       </span>
                     )}
                     <h4 className="font-bold text-base text-slate-900">{tier.name}</h4>
                     <p className="text-xs text-slate-600 mt-1 font-semibold">{tier.students}</p>
                     <div className="mt-3">
-                      <span className="text-2xl font-extrabold text-slate-900">{tier.price}</span>
+                      <span className="text-2xl font-black text-slate-900">{tier.price}</span>
                       <span className="text-xs text-slate-500">{tier.interval}</span>
                     </div>
                   </div>
-                  <button
-                    onClick={() => {
-                      alert(`Initiating Paystack checkout for ${tier.name} plan (${tier.price}). MoMo prompt will appear on your phone.`);
-                    }}
-                    className="mt-4 w-full py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition shadow-sm"
-                  >
-                    Pay with MoMo / Card
-                  </button>
+                  <div className="mt-5 space-y-2">
+                    <button
+                      onClick={() =>
+                        handleInitiateCheckout(
+                          tier.key,
+                          'monthly',
+                          selectedCheckoutGateway === 'sandbox',
+                          selectedCheckoutGateway
+                        )
+                      }
+                      disabled={checkoutLoading}
+                      className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition shadow-sm flex items-center justify-center gap-1.5"
+                    >
+                      {checkoutLoading && selectedCheckoutPlan === tier.key ? (
+                        <span className="animate-spin">⚙️</span>
+                      ) : (
+                        <span>💳</span>
+                      )}
+                      <span>
+                        {selectedCheckoutGateway === 'sandbox'
+                          ? `Instant Sandbox: ${tier.name}`
+                          : `Pay via ${selectedCheckoutGateway === 'paystack' ? 'Paystack' : selectedCheckoutGateway === 'flutterwave' ? 'Flutterwave' : 'Stripe'}`}
+                      </span>
+                    </button>
+                    {selectedCheckoutGateway !== 'sandbox' && (
+                      <button
+                        onClick={() => handleInitiateCheckout(tier.key, 'monthly', true, 'sandbox')}
+                        disabled={checkoutLoading}
+                        className="w-full py-1.5 rounded-lg text-[10px] font-bold text-indigo-700 hover:bg-indigo-50 border border-indigo-200 transition"
+                      >
+                        ⚡ Instant Sandbox Demo
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
 
-            <div className="text-center pt-2 border-t border-slate-100 text-xs text-slate-500">
-              Need more than 600 students? Contact support for our Enterprise tier with dedicated cloud storage.
+            <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
+              <span>Need Diamond, Enterprise, or Annual discounts?</span>
+              <button
+                onClick={() => {
+                  setShowUpgradeModal(false);
+                  setActiveTab('subscription');
+                }}
+                className="text-blue-600 font-bold hover:underline"
+              >
+                View Full Subscription Page &amp; Receipts ↗
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* OVERDUE SCREEN LOCK PAYWALL OVERLAY (NON-CLOSABLE) */}
+      {Boolean(tenant?.subscription?.isExpired || subscriptionData?.statusInfo?.isExpired || tenant?.status === 'SUSPENDED') && (
+        <div className="fixed inset-0 z-[9999] bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-4xl w-full p-6 sm:p-8 shadow-2xl border border-rose-200 my-auto animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="text-center max-w-xl mx-auto mb-6">
+              <div className="w-16 h-16 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3 shadow-inner">
+                <svg className="w-8 h-8" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+              </div>
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200 mb-2">
+                <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                PORTAL TEMPORARILY LOCKED • OVERDUE SUBSCRIPTION
+              </div>
+              <h2 className="text-2xl sm:text-3xl font-black text-slate-900">
+                {tenant?.name || 'School'} Subscription Due
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-600 mt-2 leading-relaxed">
+                The active license period for this school ended on{' '}
+                <strong className="text-slate-900">
+                  {tenant?.subscription?.currentPeriodEnd
+                    ? new Date(tenant.subscription.currentPeriodEnd).toLocaleDateString('en-GB', {
+                        day: 'numeric',
+                        month: 'long',
+                        year: 'numeric',
+                      })
+                    : 'recently'}
+                </strong>
+                . System access has been temporarily locked until renewal. All student marks, attendance, and fee ledgers are safely preserved.
+              </p>
+            </div>
+
+            {/* Non-Admin Staff Warning */}
+            {user?.role !== 'SUPER_ADMIN' && user?.role !== 'SCHOOL_ADMIN' ? (
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 text-center space-y-4">
+                <p className="text-xs sm:text-sm text-slate-700 font-medium leading-relaxed">
+                  Only School Administrators have permission to renew license tiers.
+                  Please notify your Headmaster, Principal, or School Bursar to complete the subscription renewal.
+                </p>
+                <button
+                  onClick={handleSignOut}
+                  className="px-6 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-sm transition"
+                >
+                  Sign Out of Account
+                </button>
+              </div>
+            ) : (
+              /* Admin Renewal & Paywall Options */
+              <div className="space-y-6">
+                {/* Billing Cycle Switcher */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50 p-3 rounded-2xl border border-slate-200">
+                  <span className="text-xs font-bold text-slate-700">Select Renewal Cycle:</span>
+                  <div className="inline-flex p-1 bg-white rounded-xl border border-slate-200">
+                    <button
+                      onClick={() => setPaywallCycle('monthly')}
+                      className={`px-3 py-1 text-xs font-bold rounded-lg transition ${
+                        paywallCycle === 'monthly'
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Monthly
+                    </button>
+                    <button
+                      onClick={() => setPaywallCycle('termly')}
+                      className={`px-3 py-1 text-xs font-bold rounded-lg transition flex items-center gap-1 ${
+                        paywallCycle === 'termly'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <span>Termly (4 Mo)</span>
+                      <span className="px-1 py-0.2 rounded text-[9px] font-black bg-blue-100 text-blue-700">
+                        -10%
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setPaywallCycle('annual')}
+                      className={`px-3 py-1 text-xs font-bold rounded-lg transition flex items-center gap-1 ${
+                        paywallCycle === 'annual'
+                          ? 'bg-emerald-600 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <span>Annual (12 Mo)</span>
+                      <span className="px-1 py-0.2 rounded text-[9px] font-black bg-emerald-100 text-emerald-700">
+                        -20%
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Plan Choices */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {[
+                    { key: 'COPPER', name: 'Copper', limit: 100, monthly: 150, termly: 540, annual: 1440 },
+                    { key: 'SILVER', name: 'Silver', limit: 250, monthly: 300, termly: 1080, annual: 2880, popular: true },
+                    { key: 'DIAMOND', name: 'Diamond', limit: 400, monthly: 450, termly: 1620, annual: 4320 },
+                    { key: 'GOLD', name: 'Gold', limit: 600, monthly: 600, termly: 2160, annual: 5760 },
+                    { key: 'ENTERPRISE', name: 'Enterprise', limit: 2000, monthly: 1200, termly: 4320, annual: 11520 },
+                  ].map((p) => {
+                    const price = paywallCycle === 'annual' ? p.annual : paywallCycle === 'termly' ? p.termly : p.monthly;
+                    const isSelected = selectedPaywallPlan === p.key;
+
+                    return (
+                      <button
+                        key={p.key}
+                        type="button"
+                        onClick={() => setSelectedPaywallPlan(p.key)}
+                        className={`p-3.5 rounded-2xl border text-left transition relative flex flex-col justify-between ${
+                          isSelected
+                            ? 'border-blue-600 bg-blue-50/50 ring-2 ring-blue-500/30'
+                            : 'border-slate-200 bg-white hover:border-slate-300'
+                        }`}
+                      >
+                        {p.popular && (
+                          <span className="absolute -top-2.5 right-3 px-2 py-0.5 rounded-full text-[9px] font-black bg-blue-600 text-white uppercase">
+                            POPULAR
+                          </span>
+                        )}
+                        <div>
+                          <div className="font-bold text-sm text-slate-900">{p.name}</div>
+                          <div className="text-[11px] font-semibold text-blue-600 mt-0.5">
+                            {p.limit} Students
+                          </div>
+                        </div>
+                        <div className="mt-3 pt-2 border-t border-slate-100">
+                          <span className="text-base font-black text-slate-900">
+                            GHS {price}
+                          </span>
+                          <span className="text-[10px] text-slate-400 block">
+                            /{paywallCycle === 'annual' ? 'yr' : paywallCycle === 'termly' ? 'term' : 'mo'}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Gateway Selector in Overdue Paywall */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-slate-100 rounded-2xl border border-slate-200">
+                  <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <span>💳</span>
+                    <span>Select Payment Provider:</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      { id: 'paystack', name: 'Paystack (Ghana MoMo / Cards)', icon: '🟢' },
+                      { id: 'flutterwave', name: 'Flutterwave (Pan-Africa)', icon: '🟠' },
+                      { id: 'stripe', name: 'Stripe (Cards / Apple Pay)', icon: '🟣' },
+                      { id: 'sandbox', name: 'Instant Sandbox Demo', icon: '⚡' },
+                    ].map((gw) => (
+                      <button
+                        key={gw.id}
+                        type="button"
+                        onClick={() => setSelectedCheckoutGateway(gw.id as any)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition ${
+                          selectedCheckoutGateway === gw.id
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span>{gw.icon}</span> <span>{gw.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Primary Payment Action Buttons */}
+                <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div>
+                    <div className="text-xs text-slate-500">Selected Plan</div>
+                    <div className="text-base font-bold text-slate-900">
+                      {selectedPaywallPlan} Plan ({paywallCycle}) —{' '}
+                      <span className="text-blue-600 font-black">
+                        GHS{' '}
+                        {getPlanPrice(selectedPaywallPlan, paywallCycle)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+                    <button
+                      onClick={() =>
+                        handleInitiateCheckout(
+                          selectedPaywallPlan,
+                          paywallCycle,
+                          selectedCheckoutGateway === 'sandbox',
+                          selectedCheckoutGateway
+                        )
+                      }
+                      disabled={checkoutLoading}
+                      className="flex-1 sm:flex-none px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold text-xs shadow-md transition flex items-center justify-center gap-2"
+                    >
+                      {checkoutLoading && selectedCheckoutPlan === selectedPaywallPlan ? (
+                        <span className="animate-spin">⚙️</span>
+                      ) : (
+                        <span>💳</span>
+                      )}
+                      <span>
+                        {selectedCheckoutGateway === 'sandbox'
+                          ? 'Instant Sandbox Unlock'
+                          : `Pay with ${selectedCheckoutGateway === 'paystack' ? 'Paystack' : selectedCheckoutGateway === 'flutterwave' ? 'Flutterwave' : 'Stripe'} & Unlock`}
+                      </span>
+                    </button>
+
+                    {/* Instant Sandbox Unlock Button for Dev / Staging Verification */}
+                    {selectedCheckoutGateway !== 'sandbox' && (
+                      <button
+                        onClick={() => handleInitiateCheckout(selectedPaywallPlan, paywallCycle, true, 'sandbox')}
+                        disabled={checkoutLoading}
+                        className="px-4 py-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs border border-indigo-200 transition"
+                        title="Instant activation without live external payment gateway (Sandbox mode)"
+                      >
+                        ⚡ Instant Sandbox Unlock
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Safe Exit */}
+                <div className="text-center pt-2">
+                  <button
+                    onClick={handleSignOut}
+                    className="text-xs font-bold text-red-600 hover:text-red-700 hover:underline"
+                  >
+                    Sign Out as {user?.email || 'User'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* OFFICIAL PAYMENT RECEIPT MODAL */}
+      {receiptModalSub && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-200 my-auto animate-in zoom-in-95">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="text-2xl">🧾</span>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Subscription Tax Invoice &amp; Receipt</h3>
+                  <p className="text-[11px] text-slate-400">Official proof of SaaS platform license</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setReceiptModalSub(null)}
+                className="text-slate-400 hover:text-slate-600 text-xl font-bold p-1"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Receipt Content */}
+            <div className="py-5 space-y-4 text-xs" id="printable-receipt">
+              {/* School Header */}
+              <div className="flex justify-between items-start bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                <div>
+                  <div className="font-bold text-sm text-slate-900">{tenant?.name || 'School Name'}</div>
+                  <div className="text-slate-500 font-mono text-[11px]">{tenant?.subdomain}.smsapp.com</div>
+                  <div className="text-slate-500 text-[11px]">{tenant?.email || user?.email}</div>
+                </div>
+                <div className="text-right">
+                  <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-300 uppercase">
+                    PAID &amp; VERIFIED
+                  </span>
+                  <div className="text-[10px] text-slate-400 mt-1 font-mono">
+                    Ref: {receiptModalSub.gatewayReference || receiptModalSub.id.slice(0, 14)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Details table */}
+              <div className="space-y-2.5 border-y border-slate-100 py-4">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Subscription Tier</span>
+                  <span className="font-bold text-slate-900">{receiptModalSub.plan} Plan ({receiptModalSub.studentLimit} Students)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Billing Interval</span>
+                  <span className="font-bold text-slate-900 capitalize">{receiptModalSub.billingCycle}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Period Covered</span>
+                  <span className="font-semibold text-slate-800">
+                    {new Date(receiptModalSub.currentPeriodStart).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                    {' — '}
+                    {new Date(receiptModalSub.currentPeriodEnd).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Payment Gateway</span>
+                  <span className="font-mono text-slate-800 uppercase">{receiptModalSub.paymentGateway}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Issued On</span>
+                  <span className="text-slate-800">{new Date(receiptModalSub.createdAt).toLocaleString('en-GB')}</span>
+                </div>
+              </div>
+
+              {/* Total */}
+              <div className="flex justify-between items-center text-sm pt-1">
+                <span className="font-bold text-slate-900">Total Amount Paid</span>
+                <span className="font-black text-xl text-emerald-700">
+                  {receiptModalSub.currency} {Number(receiptModalSub.amount).toFixed(2)}
+                </span>
+              </div>
+            </div>
+
+            {/* Receipt Actions */}
+            <div className="pt-4 border-t border-slate-100 flex gap-3">
+              <button
+                onClick={() => window.print()}
+                className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-sm transition flex items-center justify-center gap-1.5"
+              >
+                <span>🖨️</span>
+                <span>Print Receipt</span>
+              </button>
+              <button
+                onClick={() => setReceiptModalSub(null)}
+                className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition"
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>

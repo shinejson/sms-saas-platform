@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
+import { calculateSubscriptionStatus } from '@/lib/subscriptions';
 
 export async function GET(req: NextRequest) {
   try {
@@ -25,6 +26,10 @@ export async function GET(req: NextRequest) {
       include: {
         academicYears: {
           orderBy: { createdAt: 'desc' },
+        },
+        subscriptions: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
         },
       },
     });
@@ -212,6 +217,10 @@ export async function GET(req: NextRequest) {
     const outstandingAmount = Math.max(0, totalBilled - collectedAmount);
     const outstandingPercentage = totalBilled > 0 ? 100 - collectedPercentage : 0;
 
+    const latestSub = tenant.subscriptions?.[0];
+    const currentPeriodEnd = latestSub ? latestSub.currentPeriodEnd : new Date(tenant.createdAt.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const subscriptionStatus = calculateSubscriptionStatus(currentPeriodEnd, tenant.status);
+
     return NextResponse.json({
       success: true,
       tenant: {
@@ -222,6 +231,16 @@ export async function GET(req: NextRequest) {
         currency: tenant.currency || 'GHS',
         plan: tenant.plan,
         studentLimit: tenant.studentLimit,
+        status: tenant.status,
+        subscription: {
+          plan: tenant.plan,
+          status: subscriptionStatus.status,
+          daysRemaining: subscriptionStatus.daysRemaining,
+          isExpiringSoon: subscriptionStatus.isExpiringSoon,
+          isExpired: subscriptionStatus.isExpired,
+          currentPeriodEnd: subscriptionStatus.currentPeriodEnd,
+          billingCycle: latestSub?.billingCycle || 'monthly',
+        },
       },
       availableYears,
       activeYear: selectedYear,
