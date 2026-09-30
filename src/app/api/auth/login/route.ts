@@ -7,44 +7,50 @@ export async function POST(req: NextRequest) {
     const { email, password, subdomain } = await req.json();
 
     if (!email || !password) {
-      return NextResponse.json(
-        { error: 'Email and password are required' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Email and password are required' }, { status: 400 });
     }
 
-    let tenantId: string | undefined;
+    const cleanEmail = email.toLowerCase().trim();
 
-    if (subdomain) {
-      const tenant = await prisma.tenant.findUnique({
-        where: { subdomain: subdomain.toLowerCase().trim() },
-      });
-      if (!tenant) {
-        return NextResponse.json({ error: 'School not found' }, { status: 404 });
-      }
-      tenantId = tenant.id;
-    }
-
-    let user = await prisma.user.findFirst({
+    // Single query: look up user (+ tenant) scoped to subdomain when provided,
+    // falling back to a global email search so Super Admin can always log in.
+    const user = await prisma.user.findFirst({
       where: {
-        email: email.toLowerCase().trim(),
-        ...(tenantId ? { tenantId } : {}),
+        email: cleanEmail,
+        ...(subdomain
+          ? { tenant: { subdomain: subdomain.toLowerCase().trim() } }
+          : {}),
       },
-      include: { tenant: true },
-    });
-
-    // If not found with tenantId (e.g. Super Admin logging in or subdomain mismatch), search globally by email
-    if (!user) {
-      user = await prisma.user.findFirst({
-        where: {
-          email: email.toLowerCase().trim(),
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        role: true,
+        tenantId: true,
+        passwordHash: true,
+        status: true,
+        tenant: {
+          select: {
+            id: true,
+            name: true,
+            alias: true,
+            subdomain: true,
+            plan: true,
+            currency: true,
+          },
         },
-        include: { tenant: true },
-      });
-    }
+      },
+    });
 
     if (!user) {
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
+    }
+
+    if (user.status === 'SUSPENDED' || user.status === 'INACTIVE') {
+      return NextResponse.json(
+        { error: 'Your account has been suspended or deactivated. Contact your administrator.' },
+        { status: 403 }
+      );
     }
 
     const isValid = await verifyPassword(password, user.passwordHash);
@@ -69,21 +75,11 @@ export async function POST(req: NextRequest) {
         email: user.email,
         role: user.role,
       },
-      tenant: {
-        id: user.tenant.id,
-        name: user.tenant.name,
-        alias: user.tenant.alias,
-        subdomain: user.tenant.subdomain,
-        plan: user.tenant.plan,
-        currency: user.tenant.currency,
-      },
+      tenant: user.tenant,
       token,
     });
   } catch (error: any) {
     console.error('Login error:', error);
-    return NextResponse.json(
-      { error: error.message || 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

@@ -3,7 +3,7 @@ import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
 import { getClientIp, logAuditEvent } from '@/lib/audit';
 
-export const ACADEMIC_YEAR_TERMS = ['Term 1', 'Term 2', 'Term 3'] as const;
+const ACADEMIC_YEAR_TERMS = ['Term 1', 'Term 2', 'Term 3'] as const;
 
 type AcademicYearStatus = 'Active' | 'Inactive';
 
@@ -39,7 +39,7 @@ export async function GET(req: NextRequest) {
     const query = (searchParams.get('q') || '').trim();
     const statusFilter = (searchParams.get('status') || '').trim().toLowerCase();
 
-    const academicYears = await prisma.academicYear.findMany({
+    let academicYears = await prisma.academicYear.findMany({
       where: {
         tenantId: session.tenantId,
         ...(statusFilter === 'active' || statusFilter === 'inactive'
@@ -52,6 +52,27 @@ export async function GET(req: NextRequest) {
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    if (academicYears.length === 0 && !query && !statusFilter) {
+      const currentYear = new Date().getFullYear();
+      const defaultYearStr = `${currentYear}/${currentYear + 1}`;
+      try {
+        const createdYear = await prisma.academicYear.create({
+          data: {
+            tenantId: session.tenantId,
+            year: defaultYearStr,
+            status: 'Active',
+            currentTerm: 'Term 1',
+          },
+          include: {
+            _count: { select: { classes: true, invoices: true, attendance: true } },
+          },
+        });
+        academicYears = [createdYear];
+      } catch (e) {
+        console.error('Error auto-seeding academic year:', e);
+      }
+    }
 
     return NextResponse.json({ success: true, academicYears });
   } catch (error: any) {

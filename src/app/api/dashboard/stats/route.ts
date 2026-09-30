@@ -34,20 +34,40 @@ export async function GET(req: NextRequest) {
     }
 
     // Determine active / selected academic year
-    const availableYears = tenant.academicYears.map((y) => ({
+    let academicYears = tenant.academicYears;
+    if (academicYears.length === 0) {
+      const now = new Date();
+      const currentYear = now.getFullYear();
+      const defaultYearStr = `${currentYear}/${currentYear + 1}`;
+      try {
+        const createdYear = await prisma.academicYear.create({
+          data: {
+            tenantId: tenant.id,
+            year: defaultYearStr,
+            status: 'Active',
+            currentTerm: 'Term 1',
+          },
+        });
+        academicYears = [createdYear];
+      } catch (err) {
+        console.error('Failed to auto-seed academic year for tenant:', err);
+      }
+    }
+
+    const availableYears = academicYears.map((y) => ({
       id: y.id,
       year: y.year,
       status: y.status,
       currentTerm: y.currentTerm,
     }));
 
-    let selectedYearObj = tenant.academicYears.find((y) => y.status === 'Active') || tenant.academicYears[0];
+    let selectedYearObj = academicYears.find((y) => y.status === 'Active') || academicYears[0];
     if (reqYear && reqYear !== 'all') {
-      const match = tenant.academicYears.find((y) => y.year === reqYear);
+      const match = academicYears.find((y) => y.year === reqYear);
       if (match) selectedYearObj = match;
     }
 
-    const selectedYear = selectedYearObj ? selectedYearObj.year : '2026/2027';
+    const selectedYear = selectedYearObj ? selectedYearObj.year : '';
     const selectedTerm = reqTerm || 'All Terms';
 
     // Fetch core models in parallel
@@ -172,9 +192,11 @@ export async function GET(req: NextRequest) {
     }));
 
     if (attendanceTrend.length === 0) {
+      const now = new Date();
+      const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
       attendanceTrend = [
-        { label: 'Aug 2026', percentage: 0 },
-        { label: 'Sep 2026', percentage: 0 },
+        { label: prev.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }), percentage: 0 },
+        { label: now.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }), percentage: 0 },
       ];
     }
 
@@ -188,7 +210,7 @@ export async function GET(req: NextRequest) {
     const collectedAmount = invoices.reduce((sum, i) => sum + Number(i.paidAmount || 0), 0);
     const collectedPercentage = totalBilled > 0 ? Math.round((collectedAmount / totalBilled) * 100) : 0;
     const outstandingAmount = Math.max(0, totalBilled - collectedAmount);
-    const outstandingPercentage = totalBilled > 0 ? 100 - collectedPercentage : 100;
+    const outstandingPercentage = totalBilled > 0 ? 100 - collectedPercentage : 0;
 
     return NextResponse.json({
       success: true,
@@ -213,7 +235,7 @@ export async function GET(req: NextRequest) {
         staffCount,
         billingCategoryCount,
         activeYear: selectedYear,
-        currentTerm: selectedYearObj ? selectedYearObj.currentTerm : 'Term 1',
+        currentTerm: selectedYearObj ? selectedYearObj.currentTerm : '',
       },
       kpis: {
         totalStudents,

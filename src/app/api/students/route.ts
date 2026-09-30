@@ -18,10 +18,12 @@ export async function GET(req: NextRequest) {
 
     const { searchParams } = new URL(req.url);
     const query = searchParams.get('q') || '';
+    const classId = searchParams.get('classId') || '';
 
     const students = await prisma.student.findMany({
       where: {
         tenantId: session.tenantId,
+        ...(classId ? { classId } : {}),
         ...(query
           ? {
               OR: [
@@ -38,8 +40,8 @@ export async function GET(req: NextRequest) {
           select: { id: true, name: true },
         },
       },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+      orderBy: { firstName: 'asc' },
+      take: 200,
     });
 
     return NextResponse.json({ success: true, students });
@@ -79,6 +81,8 @@ export async function POST(req: NextRequest) {
       lastName,
       gender,
       studentId,
+      dateOfBirth,
+      classId,
       guardianName,
       guardianPhone,
       guardianEmail,
@@ -104,6 +108,8 @@ export async function POST(req: NextRequest) {
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         gender: gender || 'Not Specified',
+        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+        classId: classId || null,
         guardianName: guardianName ? guardianName.trim() : null,
         guardianPhone: guardianPhone ? guardianPhone.trim() : null,
         guardianEmail: guardianEmail ? guardianEmail.trim() : null,
