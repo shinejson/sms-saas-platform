@@ -10,6 +10,17 @@ import {
   getPlanPrice,
   getBillingCycleDays,
 } from '@/lib/subscriptions';
+import {
+  PERM_ACTIONS,
+  PERM_PAGES,
+  PERM_ROLES,
+  PERM_SECTIONS,
+  PERM_ACTION_LABELS,
+  permRoleLabel,
+  parsePermPolicy,
+  type PermAction,
+  type PermPolicy,
+} from '@/lib/permissions';
 
 interface TenantInfo {
   id: string;
@@ -812,17 +823,28 @@ export default function Dashboard() {
   const [permissionsFetched, setPermissionsFetched] = useState(false);
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [editingPermission, setEditingPermission] = useState<PermissionRecord | null>(null);
-  const [permissionForm, setPermissionForm] = useState({
+  // Form state: role + access level + the checkbox matrix (pageKey -> actions)
+  const [permissionForm, setPermissionForm] = useState<{
+    role: string;
+    accessLevel: string;
+    checks: PermPolicy;
+  }>({
     role: '',
     accessLevel: 'Full Access',
-    actions: '',
+    checks: {},
   });
+  // Legacy free-text actions of a record being edited (before the checkbox UI existed)
+  const [permissionFormLegacyText, setPermissionFormLegacyText] = useState('');
   const [permissionFormLoading, setPermissionFormLoading] = useState(false);
   const [permissionFormError, setPermissionFormError] = useState('');
   const [showDeletePermissionModal, setShowDeletePermissionModal] = useState(false);
   const [deletingPermission, setDeletingPermission] = useState<PermissionRecord | null>(null);
   const [deletePermissionLoading, setDeletePermissionLoading] = useState(false);
   const [permissionNotice, setPermissionNotice] = useState('');
+
+  // Effective permission policy of the CURRENTLY logged-in user (drives the sidebar)
+  const [permPolicy, setPermPolicy] = useState<PermPolicy | null>(null);
+  const [permPolicyLoaded, setPermPolicyLoaded] = useState(false);
 
   // Classes CRUD state
   const [classesList, setClassesList] = useState<ClassRecord[]>([]);
@@ -1197,6 +1219,70 @@ export default function Dashboard() {
       }
     }
   }, []);
+
+  // ---- ROLE-BASED ACCESS CONTROL --------------------------------------------
+  // The sidebar & in-page action buttons are driven by the permission policy
+  // attached to the logged-in user's role. What is checked for that role is
+  // solely what they will see.
+
+  const isAdminUser = user?.role === 'SCHOOL_ADMIN' || user?.role === 'SUPER_ADMIN';
+
+  /**
+   * Check a page permission for the current user.
+   * - Super Admins always have full access.
+   * - Roles without a policy keep full access (legacy behaviour).
+   * - School/Super Admins can always reach the Permissions page (safety rail).
+   */
+  const can = (pageKey: string, action: PermAction = 'view'): boolean => {
+    if (!permPolicyLoaded) return true; // don't flash-hide UI before policy loads
+    if (user?.role === 'SUPER_ADMIN') return true;
+    if (!permPolicy) return true; // no policy for this role -> full access
+    if (pageKey === 'permissions' && isAdminUser) return true;
+    const acts = permPolicy[pageKey];
+    return Array.isArray(acts) && acts.includes(action);
+  };
+
+  // Load the current user's effective permission policy
+  const fetchPermPolicy = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch('/api/permissions/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPermPolicy(data.policy || null);
+      }
+    } catch (e) {
+      console.error('Failed to load permission policy:', e);
+    } finally {
+      setPermPolicyLoaded(true);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    fetchPermPolicy();
+  }, [fetchPermPolicy]);
+
+  // Guard: if the active tab (or billing sub-tab) is not permitted for this
+  // user's role, redirect to the first page they are allowed to see.
+  useEffect(() => {
+    if (!permPolicyLoaded || !user || !permPolicy) return;
+    const pagesForTab = PERM_PAGES.filter((p) => p.tab === activeTab);
+    if (pagesForTab.length === 0) return; // not a permissioned page
+    const allowed = pagesForTab.filter((p) => can(p.key, 'view'));
+    if (allowed.length === 0) {
+      const firstAllowed = PERM_PAGES.find((p) => can(p.key, 'view'));
+      if (firstAllowed) setActiveTab(firstAllowed.tab);
+      return;
+    }
+    if (activeTab === 'billing') {
+      const subOk = allowed.some((p) => p.subTab === billingSubTab);
+      if (!subOk) setBillingSubTab((allowed[0].subTab as 'items' | 'categories') || 'items');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, billingSubTab, permPolicy, permPolicyLoaded, user]);
+  // ---------------------------------------------------------------------------
 
   // Subscription data fetching & management
   const fetchSubscriptionData = useCallback(async () => {
@@ -2241,27 +2327,111 @@ export default function Dashboard() {
     setPermissionForm({
       role: '',
       accessLevel: 'Full Access',
-      actions: '',
+      checks: {},
     });
+    setPermissionFormLegacyText('');
     setPermissionFormError('');
     setShowPermissionModal(true);
   };
 
   const openEditPermissionModal = (p: PermissionRecord) => {
     setEditingPermission(p);
+    // Legacy records stored free text — the checkbox matrix starts empty for them.
+    const parsed = parsePermPolicy(p.actions);
     setPermissionForm({
       role: p.role,
       accessLevel: p.accessLevel,
-      actions: p.actions,
+      checks: parsed || {},
     });
+    setPermissionFormLegacyText(parsed ? '' : p.actions);
     setPermissionFormError('');
     setShowPermissionModal(true);
   };
 
+  // --- Permission matrix helpers -------------------------------------------
+  const setPermPageChecks = (pageKey: string, actions: PermAction[]) => {
+    setPermissionForm((prev) => {
+      const checks = { ...prev.checks };
+      if (actions.length === 0) delete checks[pageKey];
+      else checks[pageKey] = actions;
+      return { ...prev, checks };
+    });
+  };
+
+  const togglePermCheck = (pageKey: string, action: PermAction) => {
+    setPermissionForm((prev) => {
+      const current = prev.checks[pageKey] || [];
+      // Toggling a non-view action automatically grants view as well
+      const next: PermAction[] =
+        action === 'view'
+          ? current.includes('view')
+            ? [] // unchecking view clears the whole row
+            : ['view']
+          : current.includes(action)
+          ? current.filter((a) => a !== action)
+          : PERM_ACTIONS.filter((a) => a === 'view' || current.includes(a) || a === action);
+      const checks = { ...prev.checks };
+      if (next.length === 0) delete checks[pageKey];
+      else checks[pageKey] = next;
+      return { ...prev, checks };
+    });
+  };
+
+  const togglePermSection = (sectionKey: string) => {
+    const pages = PERM_PAGES.filter((p) => p.section === sectionKey);
+    const allFullyChecked = pages.every((p) => {
+      const current = permissionForm.checks[p.key] || [];
+      return p.actions.every((a) => current.includes(a));
+    });
+    if (allFullyChecked) {
+      // clear the whole section
+      setPermissionForm((prev) => {
+        const checks = { ...prev.checks };
+        pages.forEach((p) => delete checks[p.key]);
+        return { ...prev, checks };
+      });
+    } else {
+      // check every action of every page in the section
+      setPermissionForm((prev) => {
+        const checks = { ...prev.checks };
+        pages.forEach((p) => {
+          checks[p.key] = [...p.actions];
+        });
+        return { ...prev, checks };
+      });
+    }
+  };
+
+  const permSelectAll = () => {
+    setPermissionForm((prev) => {
+      const checks: PermPolicy = {};
+      PERM_PAGES.forEach((p) => {
+        checks[p.key] = [...p.actions];
+      });
+      return { ...prev, checks };
+    });
+  };
+
+  const permClearAll = () => {
+    setPermissionForm((prev) => ({ ...prev, checks: {} }));
+  };
+
+  const permCheckedPages = Object.keys(permissionForm.checks).filter(
+    (k) => (permissionForm.checks[k] || []).length > 0
+  );
+
   const handlePermissionFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setPermissionFormLoading(true);
     setPermissionFormError('');
+    if (!permissionForm.role) {
+      setPermissionFormError('Select the system role this permission policy applies to.');
+      return;
+    }
+    if (permCheckedPages.length === 0) {
+      setPermissionFormError('Check at least one page (with "Can see") so this role has access to something.');
+      return;
+    }
+    setPermissionFormLoading(true);
     try {
       const url = editingPermission ? `/api/permissions/${editingPermission.id}` : '/api/permissions';
       const method = editingPermission ? 'PUT' : 'POST';
@@ -2271,7 +2441,11 @@ export default function Dashboard() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(permissionForm),
+        body: JSON.stringify({
+          role: permissionForm.role,
+          accessLevel: permissionForm.accessLevel,
+          actions: JSON.stringify(permissionForm.checks),
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save permission.');
@@ -2279,6 +2453,9 @@ export default function Dashboard() {
       setPermissionNotice(data.message || 'Permission saved successfully.');
       setPermissionsFetched(false);
       fetchPermissions();
+      // Refresh the current user's own policy — if they edited their own role,
+      // their sidebar updates immediately to match what was just checked.
+      fetchPermPolicy();
     } catch (err: any) {
       setPermissionFormError(err.message);
     } finally {
@@ -2321,10 +2498,15 @@ export default function Dashboard() {
     if (!q) return true;
     return (
       p.role.toLowerCase().includes(q) ||
+      permRoleLabel(p.role).toLowerCase().includes(q) ||
       p.accessLevel.toLowerCase().includes(q) ||
       p.actions.toLowerCase().includes(q)
     );
   });
+
+  // System roles that do not have a permission policy yet (they keep full access)
+  const managedRoleValues = new Set(permissions.map((p) => p.role.trim().toUpperCase()));
+  const unmanagedRoles = PERM_ROLES.filter((r) => !managedRoleValues.has(r.value));
 
   // ---- CLASSES CRUD ----
 
@@ -5045,26 +5227,27 @@ export default function Dashboard() {
   });
 
   // Topnav Global Omnisearch Pages & Modules Definition
+  // (perm = permission page key; pages the current user cannot see never show up in search)
   const NAVIGATION_PAGES = [
-    { id: 'overview', name: 'Dashboard Overview', desc: 'Real-time KPIs & operational summaries', icon: '📊', tab: 'overview' },
-    { id: 'students', name: 'Students Directory', desc: 'Enrollment, student profiles & records', icon: '🎓', tab: 'students' },
-    { id: 'teachers', name: 'Teachers & Faculty Directory', desc: 'Faculty staff, classes & contacts', icon: '👨‍🏫', tab: 'teachers' },
-    { id: 'classes', name: 'Classes & Streams', desc: 'Classrooms, streams & form teachers', icon: '🏫', tab: 'classes' },
-    { id: 'subjects', name: 'Subjects Curriculum', desc: 'GES courses, subject assignments', icon: '📚', tab: 'subjects' },
-    { id: 'attendance', name: 'Attendance Register', desc: 'Daily attendance logs & absentees', icon: '📅', tab: 'attendance' },
-    { id: 'performance', name: 'Assessment & GES Scores', desc: 'Continuous assessments & terminal exams', icon: '📝', tab: 'performance' },
-    { id: 'terminal-report', name: 'Terminal Report Cards', desc: 'Printable WAEC/GES terminal report cards', icon: '📋', tab: 'performance', action: 'terminal_report' },
-    { id: 'billing', name: 'Fees & Invoicing', desc: 'Fee categories, student bills & items', icon: '🧾', tab: 'billing' },
-    { id: 'payments', name: 'Payment Records', desc: 'Receipts, MoMo payments & fee ledger', icon: '💰', tab: 'payments' },
-    { id: 'reports', name: 'Reports & Analytics', desc: 'Academic, financial & attendance reports', icon: '📈', tab: 'reports' },
-    { id: 'academic-years', name: 'Academic Years & Terms', desc: 'Active school terms & semester configuration', icon: '🗓️', tab: 'academic-years' },
-    { id: 'subscription', name: 'Subscription & Licensing', desc: 'Plan upgrade, quotas & online renewal', icon: '💳', tab: 'subscription' },
-    { id: 'settings', name: 'School Profile Settings', desc: 'School name, logo, grading scale & lists', icon: '⚙️', tab: 'settings', subTab: 'profile' },
-    { id: 'gateways', name: 'Payment Gateways Config', desc: 'Paystack, Flutterwave, Stripe credentials', icon: '💳', tab: 'settings', subTab: 'gateways' },
-    { id: 'users', name: 'System Users', desc: 'Staff logins, administrators & credentials', icon: '👥', tab: 'users' },
-    { id: 'permissions', name: 'Permissions Matrix', desc: 'Role capabilities & administrative rights', icon: '🛡️', tab: 'permissions' },
-    { id: 'parents', name: 'Parent Portals', desc: 'Student-guardian mapping & portal access', icon: '👨‍👩‍👧', tab: 'parents' },
-  ];
+    { id: 'overview', name: 'Dashboard Overview', desc: 'Real-time KPIs & operational summaries', icon: '📊', tab: 'overview', perm: 'overview' },
+    { id: 'students', name: 'Students Directory', desc: 'Enrollment, student profiles & records', icon: '🎓', tab: 'students', perm: 'students' },
+    { id: 'teachers', name: 'Teachers & Faculty Directory', desc: 'Faculty staff, classes & contacts', icon: '👨‍🏫', tab: 'teachers', perm: 'teachers' },
+    { id: 'classes', name: 'Classes & Streams', desc: 'Classrooms, streams & form teachers', icon: '🏫', tab: 'classes', perm: 'classes' },
+    { id: 'subjects', name: 'Subjects Curriculum', desc: 'GES courses, subject assignments', icon: '📚', tab: 'subjects', perm: 'subjects' },
+    { id: 'attendance', name: 'Attendance Register', desc: 'Daily attendance logs & absentees', icon: '📅', tab: 'attendance', perm: 'attendance' },
+    { id: 'performance', name: 'Assessment & GES Scores', desc: 'Continuous assessments & terminal exams', icon: '📝', tab: 'performance', perm: 'performance' },
+    { id: 'terminal-report', name: 'Terminal Report Cards', desc: 'Printable WAEC/GES terminal report cards', icon: '📋', tab: 'performance', action: 'terminal_report', perm: 'performance' },
+    { id: 'billing', name: 'Fees & Invoicing', desc: 'Fee categories, student bills & items', icon: '🧾', tab: 'billing', perm: 'billing_items' },
+    { id: 'payments', name: 'Payment Records', desc: 'Receipts, MoMo payments & fee ledger', icon: '💰', tab: 'payments', perm: 'payments' },
+    { id: 'reports', name: 'Reports & Analytics', desc: 'Academic, financial & attendance reports', icon: '📈', tab: 'reports', perm: 'reports' },
+    { id: 'academic-years', name: 'Academic Years & Terms', desc: 'Active school terms & semester configuration', icon: '🗓️', tab: 'academic-years', perm: 'academic_years' },
+    { id: 'subscription', name: 'Subscription & Licensing', desc: 'Plan upgrade, quotas & online renewal', icon: '💳', tab: 'subscription', perm: 'subscription' },
+    { id: 'settings', name: 'School Profile Settings', desc: 'School name, logo, grading scale & lists', icon: '⚙️', tab: 'settings', subTab: 'profile', perm: 'settings' },
+    { id: 'gateways', name: 'Payment Gateways Config', desc: 'Paystack, Flutterwave, Stripe credentials', icon: '💳', tab: 'settings', subTab: 'gateways', perm: 'settings' },
+    { id: 'users', name: 'System Users', desc: 'Staff logins, administrators & credentials', icon: '👥', tab: 'users', perm: 'users' },
+    { id: 'permissions', name: 'Permissions Matrix', desc: 'Role capabilities & administrative rights', icon: '🛡️', tab: 'permissions', perm: 'permissions' },
+    { id: 'parents', name: 'Parent Portals', desc: 'Student-guardian mapping & portal access', icon: '👨‍👩‍👧', tab: 'parents', perm: 'parents' },
+  ].filter((p) => can(p.perm, 'view'));
 
   const searchNormalized = searchQuery.trim().toLowerCase();
 
@@ -5282,223 +5465,266 @@ export default function Dashboard() {
         {/* Scrollable Nav Items */}
         <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4 custom-sidebar-scroll">
           {/* Active / Inactive Dashboard */}
-          <button
-            onClick={() => {
-              setActiveTab('overview');
-              setMobileMenuOpen(false);
-            }}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition ${
-              activeTab === 'overview'
-                ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
-                : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
-            }`}
-          >
-            <DashboardIcon className="w-5 h-5 shrink-0" />
-            <span>Dashboard</span>
-          </button>
+          {can('overview') && (
+              <button
+                onClick={() => {
+                  setActiveTab('overview');
+                  setMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition ${
+                  activeTab === 'overview'
+                    ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
+                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                }`}
+              >
+                <DashboardIcon className="w-5 h-5 shrink-0" />
+                <span>Dashboard</span>
+              </button>
+          )}
 
           {/* PEOPLE */}
-          <div>
-            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
-              PEOPLE
+          {[
+            { id: 'students', label: 'Students', Icon: StudentsIcon, perm: 'students' },
+            { id: 'teachers', label: 'Teachers', Icon: TeachersIcon, perm: 'teachers' },
+            { id: 'users', label: 'Users', Icon: UsersIcon, perm: 'users' },
+            { id: 'parents', label: 'Parents', Icon: ParentsIcon, perm: 'parents' },
+            { id: 'permissions', label: 'Permissions', Icon: PermissionsIcon, perm: 'permissions' },
+          ].some((item) => can(item.perm)) && (
+            <div>
+              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
+                PEOPLE
+              </div>
+              <div className="space-y-0.5">
+                {[
+                  { id: 'students', label: 'Students', Icon: StudentsIcon, perm: 'students' },
+                  { id: 'teachers', label: 'Teachers', Icon: TeachersIcon, perm: 'teachers' },
+                  { id: 'users', label: 'Users', Icon: UsersIcon, perm: 'users' },
+                  { id: 'parents', label: 'Parents', Icon: ParentsIcon, perm: 'parents' },
+                  { id: 'permissions', label: 'Permissions', Icon: PermissionsIcon, perm: 'permissions' },
+                ]
+                  .filter((item) => can(item.perm))
+                  .map(({ id, label, Icon }) => {
+                    const active = activeTab === id;
+                    return (
+                      <button
+                        key={id}
+                        onClick={() => {
+                          setActiveTab(id);
+                          setMobileMenuOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                          active
+                            ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                            : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                        }`}
+                      >
+                        <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`} />
+                        <span>{label}</span>
+                      </button>
+                    );
+                  })}
+              </div>
             </div>
-            <div className="space-y-0.5">
-              {[
-                { id: 'students', label: 'Students', Icon: StudentsIcon },
-                { id: 'teachers', label: 'Teachers', Icon: TeachersIcon },
-                { id: 'users', label: 'Users', Icon: UsersIcon },
-                { id: 'parents', label: 'Parents', Icon: ParentsIcon },
-                { id: 'permissions', label: 'Permissions', Icon: PermissionsIcon },
-              ].map(({ id, label, Icon }) => {
-                const active = activeTab === id;
-                return (
-                  <button
-                    key={id}
-                    onClick={() => {
-                      setActiveTab(id);
-                      setMobileMenuOpen(false);
-                    }}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                      active
-                        ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                    }`}
-                  >
-                    <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`} />
-                    <span>{label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+          )}
 
           {/* ACADEMICS */}
-          <div>
-            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
-              ACADEMICS
+          {[
+            { id: 'classes', perm: 'classes' },
+            { id: 'subjects', perm: 'subjects' },
+            { id: 'enrollments', perm: 'enrollments' },
+            { id: 'attendance', perm: 'attendance' },
+            { id: 'academic-years', perm: 'academic_years' },
+            { id: 'performance', perm: 'performance' },
+          ].some((item) => can(item.perm)) && (
+            <div>
+              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
+                ACADEMICS
+              </div>
+              <div className="space-y-0.5">
+                {[
+                  { id: 'classes', label: 'Classes', Icon: ClassesIcon, perm: 'classes' },
+                  { id: 'subjects', label: 'Subject', Icon: SubjectIcon, perm: 'subjects' },
+                  { id: 'enrollments', label: 'Enrollments', Icon: EnrollmentsIcon, perm: 'enrollments' },
+                  { id: 'attendance', label: 'Attendance', Icon: AttendanceIcon, perm: 'attendance' },
+                  { id: 'academic-years', label: 'Academic Years', Icon: AcademicYearsIcon, perm: 'academic_years' },
+                  { id: 'performance', label: 'Assessment', Icon: PerformanceIcon, perm: 'performance' },
+                ]
+                  .filter((item) => can(item.perm))
+                  .map(({ id, label, Icon }) => {
+                    const active = activeTab === id;
+                    return (
+                      <button
+                        key={id}
+                        onClick={() => {
+                          setActiveTab(id);
+                          setMobileMenuOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                          active
+                            ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                            : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                        }`}
+                      >
+                        <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`} />
+                        <span>{label}</span>
+                      </button>
+                    );
+                  })}
+              </div>
             </div>
-            <div className="space-y-0.5">
-              {[
-                { id: 'classes', label: 'Classes', Icon: ClassesIcon },
-                { id: 'subjects', label: 'Subject', Icon: SubjectIcon },
-                { id: 'enrollments', label: 'Enrollments', Icon: EnrollmentsIcon },
-                { id: 'attendance', label: 'Attendance', Icon: AttendanceIcon },
-                { id: 'academic-years', label: 'Academic Years', Icon: AcademicYearsIcon },
-                { id: 'performance', label: 'Assessment', Icon: PerformanceIcon },
-              ].map(({ id, label, Icon }) => {
-                const active = activeTab === id;
-                return (
-                  <button
-                    key={id}
-                    onClick={() => {
-                      setActiveTab(id);
-                      setMobileMenuOpen(false);
-                    }}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                      active
-                        ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                    }`}
-                  >
-                    <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`} />
-                    <span>{label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+          )}
 
           {/* FINANCE */}
-          <div>
-            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
-              FINANCE
+          {(can('invoices') || can('payments') || can('billing_items') || can('billing_categories')) && (
+            <div>
+              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
+                FINANCE
+              </div>
+              <div className="space-y-0.5">
+                {can('invoices') && (
+                    <button
+                      onClick={() => { setActiveTab('invoices'); setMobileMenuOpen(false); }}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                        activeTab === 'invoices'
+                          ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      }`}
+                    >
+                      <InvoicesIcon className={`w-5 h-5 shrink-0 ${activeTab === 'invoices' ? 'text-white' : 'text-slate-500'}`} />
+                      <span>Invoices</span>
+                    </button>
+                )}
+
+                {can('payments') && (
+                    <button
+                      onClick={() => { setActiveTab('payments'); setMobileMenuOpen(false); }}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                        activeTab === 'payments'
+                          ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      }`}
+                    >
+                      <PaymentsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'payments' ? 'text-white' : 'text-slate-500'}`} />
+                      <span>Payments</span>
+                    </button>
+                )}
+
+                {can('billing_items') && (
+                    <button
+                      onClick={() => {
+                        setActiveTab('billing');
+                        setBillingSubTab('items');
+                        setMobileMenuOpen(false);
+                      }}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                        activeTab === 'billing' && billingSubTab === 'items'
+                          ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      }`}
+                    >
+                      <BillingsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'billing' && billingSubTab === 'items' ? 'text-white' : 'text-slate-500'}`} />
+                      <span>Billings</span>
+                    </button>
+                )}
+
+                {can('billing_categories') && (
+                    <button
+                      onClick={() => {
+                        setActiveTab('billing');
+                        setBillingSubTab('categories');
+                        setMobileMenuOpen(false);
+                      }}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                        activeTab === 'billing' && billingSubTab === 'categories'
+                          ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      }`}
+                    >
+                      <BillingCategoriesIcon className={`w-5 h-5 shrink-0 ${activeTab === 'billing' && billingSubTab === 'categories' ? 'text-white' : 'text-slate-500'}`} />
+                      <span>Billing Categories</span>
+                    </button>
+                )}
+              </div>
             </div>
-            <div className="space-y-0.5">
-              <button
-                onClick={() => { setActiveTab('invoices'); setMobileMenuOpen(false); }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                  activeTab === 'invoices'
-                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <InvoicesIcon className={`w-5 h-5 shrink-0 ${activeTab === 'invoices' ? 'text-white' : 'text-slate-500'}`} />
-                <span>Invoices</span>
-              </button>
-
-              <button
-                onClick={() => { setActiveTab('payments'); setMobileMenuOpen(false); }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                  activeTab === 'payments'
-                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <PaymentsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'payments' ? 'text-white' : 'text-slate-500'}`} />
-                <span>Payments</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setActiveTab('billing');
-                  setBillingSubTab('items');
-                  setMobileMenuOpen(false);
-                }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                  activeTab === 'billing' && billingSubTab === 'items'
-                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <BillingsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'billing' && billingSubTab === 'items' ? 'text-white' : 'text-slate-500'}`} />
-                <span>Billings</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setActiveTab('billing');
-                  setBillingSubTab('categories');
-                  setMobileMenuOpen(false);
-                }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                  activeTab === 'billing' && billingSubTab === 'categories'
-                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <BillingCategoriesIcon className={`w-5 h-5 shrink-0 ${activeTab === 'billing' && billingSubTab === 'categories' ? 'text-white' : 'text-slate-500'}`} />
-                <span>Billing Categories</span>
-              </button>
-            </div>
-          </div>
+          )}
 
           {/* SYSTEM */}
-          <div>
+          {(can('subscription') || can('settings') || can('reports') || can('migration')) && (
+            <div>
             <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
               SYSTEM
             </div>
             <div className="space-y-0.5">
-              <button
-                onClick={() => { setActiveTab('subscription'); setMobileMenuOpen(false); }}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition ${
-                  activeTab === 'subscription'
-                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <SubscriptionIcon className={`w-5 h-5 shrink-0 ${activeTab === 'subscription' ? 'text-white' : 'text-slate-500'}`} />
-                  <span>Subscription</span>
-                </div>
-                {tenant?.subscription?.status === 'expiring_soon' && (
-                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
-                    {tenant.subscription.daysRemaining}d
-                  </span>
-                )}
-                {tenant?.subscription?.status === 'expired' && (
-                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300">
-                    Due
-                  </span>
-                )}
-              </button>
+              {can('subscription') && (
+                <button
+                  onClick={() => { setActiveTab('subscription'); setMobileMenuOpen(false); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition ${
+                    activeTab === 'subscription'
+                      ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <SubscriptionIcon className={`w-5 h-5 shrink-0 ${activeTab === 'subscription' ? 'text-white' : 'text-slate-500'}`} />
+                    <span>Subscription</span>
+                  </div>
+                  {tenant?.subscription?.status === 'expiring_soon' && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
+                      {tenant.subscription.daysRemaining}d
+                    </span>
+                  )}
+                  {tenant?.subscription?.status === 'expired' && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300">
+                      Due
+                    </span>
+                  )}
+                </button>
+              )}
 
-              <button
-                onClick={() => { setActiveTab('settings'); setMobileMenuOpen(false); }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                  activeTab === 'settings'
-                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <SettingsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'settings' ? 'text-white' : 'text-slate-500'}`} />
-                <span>Settings</span>
-              </button>
+              {can('settings') && (
+                <button
+                  onClick={() => { setActiveTab('settings'); setMobileMenuOpen(false); }}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                    activeTab === 'settings'
+                      ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <SettingsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'settings' ? 'text-white' : 'text-slate-500'}`} />
+                  <span>Settings</span>
+                </button>
+              )}
 
-              <button
-                onClick={() => { setActiveTab('reports'); setMobileMenuOpen(false); }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                  activeTab === 'reports'
-                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <ReportsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'reports' ? 'text-white' : 'text-slate-500'}`} />
-                <span>Reports</span>
-              </button>
+              {can('reports') && (
+                <button
+                  onClick={() => { setActiveTab('reports'); setMobileMenuOpen(false); }}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                    activeTab === 'reports'
+                      ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <ReportsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'reports' ? 'text-white' : 'text-slate-500'}`} />
+                  <span>Reports</span>
+                </button>
+              )}
 
-              <button
-                onClick={() => { setActiveTab('migration'); setMobileMenuOpen(false); }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
-                  activeTab === 'migration'
-                    ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <MigrationIcon className={`w-5 h-5 shrink-0 ${activeTab === 'migration' ? 'text-white' : 'text-slate-500'}`} />
-                <span>Sheets Migration</span>
-              </button>
+              {can('migration') && (
+                <button
+                  onClick={() => { setActiveTab('migration'); setMobileMenuOpen(false); }}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                    activeTab === 'migration'
+                      ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <MigrationIcon className={`w-5 h-5 shrink-0 ${activeTab === 'migration' ? 'text-white' : 'text-slate-500'}`} />
+                  <span>Sheets Migration</span>
+                </button>
+              )}
             </div>
           </div>
+          )}
         </div>
 
         {/* Pinned Bottom of Sidebar */}
@@ -5525,12 +5751,14 @@ export default function Dashboard() {
             </div>
             <div className="flex items-center justify-between text-[10px]">
               <span className="text-slate-400 font-medium">{tenant?.plan || 'DEMO'} Plan</span>
-              <button
-                onClick={() => setActiveTab('subscription')}
-                className="font-bold text-blue-600 hover:text-blue-700 hover:underline"
-              >
-                Upgrade ↗
-              </button>
+              {can('subscription') && (
+                  <button
+                    onClick={() => setActiveTab('subscription')}
+                    className="font-bold text-blue-600 hover:text-blue-700 hover:underline"
+                  >
+                    Upgrade ↗
+                  </button>
+              )}
             </div>
           </div>
 
@@ -6156,12 +6384,14 @@ export default function Dashboard() {
                       <p className="text-xs text-amber-700">No active academic session found. Create an academic year to manage terms, timetable, attendance, and student billing.</p>
                     </div>
                   </div>
-                  <button
-                    onClick={openAddYearModal}
-                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-xl shadow-sm transition whitespace-nowrap self-start sm:self-auto"
-                  >
-                    + Create Academic Year
-                  </button>
+                  {can('academic_years', 'create') && (
+                      <button
+                      onClick={openAddYearModal}
+                      className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-xl shadow-sm transition whitespace-nowrap self-start sm:self-auto"
+                    >
+                      + Create Academic Year
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -6196,14 +6426,16 @@ export default function Dashboard() {
                       <label className={`block text-xs font-semibold ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                         Academic Year
                       </label>
-                      <button
-                        type="button"
-                        onClick={openAddYearModal}
-                        className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-0.5"
-                        title="Configure new academic year"
-                      >
-                        + Add Year
-                      </button>
+                      {can('academic_years', 'create') && (
+                          <button
+                          type="button"
+                          onClick={openAddYearModal}
+                          className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-0.5"
+                          title="Configure new academic year"
+                        >
+                          + Add Year
+                        </button>
+                      )}
                     </div>
                     <select
                       value={selectedYear}
@@ -6557,18 +6789,22 @@ export default function Dashboard() {
                     <p className="text-xs text-slate-500">Recent admissions registered in {tenant?.name}.</p>
                   </div>
                   <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => setShowEnrollModal(true)}
-                      className="px-3 py-1.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 shadow-sm transition flex items-center gap-1.5"
-                    >
-                      <span>➕</span> Enroll Student
-                    </button>
-                    <button
-                      onClick={() => setActiveTab('students')}
-                      className="text-xs font-semibold text-blue-600 hover:underline"
-                    >
-                      View All Students →
-                    </button>
+                    {can('students', 'create') && (
+                        <button
+                        onClick={() => setShowEnrollModal(true)}
+                        className="px-3 py-1.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 shadow-sm transition flex items-center gap-1.5"
+                      >
+                        <span>➕</span> Enroll Student
+                      </button>
+                    )}
+                    {can('students') && (
+                        <button
+                          onClick={() => setActiveTab('students')}
+                          className="text-xs font-semibold text-blue-600 hover:underline"
+                        >
+                          View All Students →
+                        </button>
+                    )}
                   </div>
                 </div>
 
@@ -6581,12 +6817,14 @@ export default function Dashboard() {
                       No students enrolled yet
                     </p>
                     <p className="text-xs text-slate-500 mt-1">Enroll your first student or import data from your Google Sheet.</p>
-                    <button
-                      onClick={() => setShowEnrollModal(true)}
-                      className="mt-4 px-4 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
-                    >
-                      Enroll First Student
-                    </button>
+                    {can('students', 'create') && (
+                        <button
+                        onClick={() => setShowEnrollModal(true)}
+                        className="mt-4 px-4 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                      >
+                        Enroll First Student
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
@@ -6635,21 +6873,25 @@ export default function Dashboard() {
                   <p className="text-sm text-slate-500">Manage admissions, guardian records, and class assignments.</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setShowImportModal(true)}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700 shadow-sm transition flex items-center gap-2"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                    </svg>
-                    Import Students
-                  </button>
-                  <button
-                    onClick={() => setShowEnrollModal(true)}
-                    className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
-                  >
-                    <span>➕</span> Enroll Student
-                  </button>
+                  {can('students', 'create') && (
+                      <button
+                        onClick={() => setShowImportModal(true)}
+                        className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700 shadow-sm transition flex items-center gap-2"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                        </svg>
+                        Import Students
+                      </button>
+                  )}
+                  {can('students', 'create') && (
+                      <button
+                        onClick={() => setShowEnrollModal(true)}
+                        className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
+                      >
+                        <span>➕</span> Enroll Student
+                      </button>
+                  )}
                 </div>
               </div>
 
@@ -6735,12 +6977,14 @@ export default function Dashboard() {
                   >
                     Sync from Sheets
                   </button>
-                  <button
-                    onClick={openAddClassModal}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition shadow-sm flex items-center gap-1.5"
-                  >
-                    <span>+</span> Add Class
-                  </button>
+                  {can('classes', 'create') && (
+                      <button
+                      onClick={openAddClassModal}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition shadow-sm flex items-center gap-1.5"
+                    >
+                      <span>+</span> Add Class
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -6843,7 +7087,7 @@ export default function Dashboard() {
                         ? 'No classes match your current search query. Try searching for a different keyword.'
                         : 'No classroom rosters have been created yet. Add your first class to get started.'}
                     </p>
-                    {!classSearchQuery && (
+                    {!classSearchQuery && can('classes', 'create') && (
                       <button
                         onClick={openAddClassModal}
                         className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition"
@@ -6886,29 +7130,33 @@ export default function Dashboard() {
 
                           {/* Action Buttons */}
                           <div className="flex items-center gap-2 shrink-0">
-                            <button
-                              onClick={() => openEditClassModal(c)}
-                              className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-100 font-semibold text-xs transition flex items-center gap-1"
-                              title="Edit class"
-                            >
-                              <span>✏️</span> Edit
-                            </button>
-                            <button
-                              onClick={() => openDeleteClassModal(c)}
-                              disabled={hasStudents}
-                              className={`px-3 py-1.5 rounded-lg font-semibold text-xs transition flex items-center gap-1 ${
-                                hasStudents
-                                  ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
-                                  : 'border border-red-200 text-red-600 hover:bg-red-50'
-                              }`}
-                              title={
-                                hasStudents
-                                  ? 'Move or remove students before deleting this class'
-                                  : 'Delete class'
-                              }
-                            >
-                              <span>🗑️</span> Delete
-                            </button>
+                            {can('classes', 'edit') && (
+                                <button
+                                onClick={() => openEditClassModal(c)}
+                                className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-100 font-semibold text-xs transition flex items-center gap-1"
+                                title="Edit class"
+                              >
+                                <span>✏️</span> Edit
+                              </button>
+                            )}
+                            {can('classes', 'delete') && (
+                                <button
+                                onClick={() => openDeleteClassModal(c)}
+                                disabled={hasStudents}
+                                className={`px-3 py-1.5 rounded-lg font-semibold text-xs transition flex items-center gap-1 ${
+                                  hasStudents
+                                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
+                                    : 'border border-red-200 text-red-600 hover:bg-red-50'
+                                }`}
+                                title={
+                                  hasStudents
+                                    ? 'Move or remove students before deleting this class'
+                                    : 'Delete class'
+                                }
+                              >
+                                <span>🗑️</span> Delete
+                              </button>
+                            )}
                           </div>
                         </div>
                       );
@@ -7089,35 +7337,39 @@ export default function Dashboard() {
 
               {/* Sub-tab Navigation */}
               <div className="flex items-center gap-3 border-b border-slate-200 pb-3">
-                <button
-                  onClick={() => setBillingSubTab('items')}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
-                    billingSubTab === 'items'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
-                  }`}
-                >
-                  <span>🏷️</span>
-                  <span>Fee Items (Billings)</span>
-                  <span className={`px-1.5 py-0.5 rounded-full text-[10px] ${billingSubTab === 'items' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600'}`}>
-                    {billingItems.length}
-                  </span>
-                </button>
+                {can('billing_items') && (
+                    <button
+                      onClick={() => setBillingSubTab('items')}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
+                        billingSubTab === 'items'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span>🏷️</span>
+                      <span>Fee Items (Billings)</span>
+                      <span className={`px-1.5 py-0.5 rounded-full text-[10px] ${billingSubTab === 'items' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600'}`}>
+                        {billingItems.length}
+                      </span>
+                    </button>
+                )}
 
-                <button
-                  onClick={() => setBillingSubTab('categories')}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
-                    billingSubTab === 'categories'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
-                  }`}
-                >
-                  <span>📁</span>
-                  <span>Billing Categories</span>
-                  <span className={`px-1.5 py-0.5 rounded-full text-[10px] ${billingSubTab === 'categories' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600'}`}>
-                    {billingCategories.length}
-                  </span>
-                </button>
+                {can('billing_categories') && (
+                    <button
+                      onClick={() => setBillingSubTab('categories')}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
+                        billingSubTab === 'categories'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span>📁</span>
+                      <span>Billing Categories</span>
+                      <span className={`px-1.5 py-0.5 rounded-full text-[10px] ${billingSubTab === 'categories' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600'}`}>
+                        {billingCategories.length}
+                      </span>
+                    </button>
+                )}
               </div>
 
               {/* SUB-TAB 1: BILLING ITEMS */}
@@ -7130,12 +7382,14 @@ export default function Dashboard() {
                         Individual billable charges (e.g. Tuition Fee, Bed User Fee, Sports Fee, PTA).
                       </p>
                     </div>
-                    <button
-                      onClick={() => setShowCreateItemModal(true)}
-                      className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 shadow-sm transition flex items-center gap-1.5"
-                    >
-                      <span>➕</span> Add Fee Item
-                    </button>
+                    {can('billing_items', 'create') && (
+                        <button
+                          onClick={() => setShowCreateItemModal(true)}
+                          className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 shadow-sm transition flex items-center gap-1.5"
+                        >
+                          <span>➕</span> Add Fee Item
+                        </button>
+                    )}
                   </div>
 
                   <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -7157,12 +7411,14 @@ export default function Dashboard() {
                               <td colSpan={6} className="py-10 text-center text-slate-500">
                                 <p className="text-sm font-semibold text-slate-700">No fee items created yet.</p>
                                 <p className="text-xs text-slate-400 mt-1">Add items like Tuition, Bed User Fee, or Sports Fee.</p>
-                                <button
-                                  onClick={() => setShowCreateItemModal(true)}
-                                  className="mt-3 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
-                                >
-                                  + Create First Fee Item
-                                </button>
+                                {can('billing_items', 'create') && (
+                                    <button
+                                      onClick={() => setShowCreateItemModal(true)}
+                                      className="mt-3 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                                    >
+                                      + Create First Fee Item
+                                    </button>
+                                )}
                               </td>
                             </tr>
                           ) : (
@@ -7180,13 +7436,15 @@ export default function Dashboard() {
                                 </td>
                                 <td className="py-3 px-4 text-slate-500">{item.description || '—'}</td>
                                 <td className="py-3 px-4 text-right">
-                                  <button
-                                    onClick={() => handleDeleteBillingItem(item.id)}
-                                    className="p-1 text-red-500 hover:text-red-700 text-xs font-bold"
-                                    title="Delete item"
-                                  >
-                                    🗑️
-                                  </button>
+                                  {can('billing_items', 'delete') && (
+                                      <button
+                                        onClick={() => handleDeleteBillingItem(item.id)}
+                                        className="p-1 text-red-500 hover:text-red-700 text-xs font-bold"
+                                        title="Delete item"
+                                      >
+                                        🗑️
+                                      </button>
+                                  )}
                                 </td>
                               </tr>
                             ))
@@ -7208,15 +7466,17 @@ export default function Dashboard() {
                         Bundled fees assigned by grade (Primary, JHS, Nursery) per academic year & term.
                       </p>
                     </div>
-                    <button
-                      onClick={() => {
-                        setShowCreateCategoryModal(true);
-                        setSelectedItemNames([]);
-                      }}
-                      className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 shadow-sm transition flex items-center gap-1.5"
-                    >
-                      <span>➕</span> Create Billing Category
-                    </button>
+                    {can('billing_categories', 'create') && (
+                        <button
+                          onClick={() => {
+                            setShowCreateCategoryModal(true);
+                            setSelectedItemNames([]);
+                          }}
+                          className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 shadow-sm transition flex items-center gap-1.5"
+                        >
+                          <span>➕</span> Create Billing Category
+                        </button>
+                    )}
                   </div>
 
                   <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -7239,15 +7499,17 @@ export default function Dashboard() {
                               <td colSpan={7} className="py-10 text-center text-slate-500">
                                 <p className="text-sm font-semibold text-slate-700">No billing categories configured yet.</p>
                                 <p className="text-xs text-slate-400 mt-1">Group fee items for Primary, JHS, Nursery, or Secondary.</p>
-                                <button
-                                  onClick={() => {
-                                    setShowCreateCategoryModal(true);
-                                    setSelectedItemNames([]);
-                                  }}
-                                  className="mt-3 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
-                                >
-                                  + Create First Category
-                                </button>
+                                {can('billing_categories', 'create') && (
+                                    <button
+                                      onClick={() => {
+                                        setShowCreateCategoryModal(true);
+                                        setSelectedItemNames([]);
+                                      }}
+                                      className="mt-3 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                                    >
+                                      + Create First Category
+                                    </button>
+                                )}
                               </td>
                             </tr>
                           ) : (
@@ -7278,13 +7540,15 @@ export default function Dashboard() {
                                   {tenant?.currency || 'GHS'} {Number(cat.totalAmount).toFixed(2)}
                                 </td>
                                 <td className="py-3 px-4 text-right">
-                                  <button
-                                    onClick={() => handleDeleteBillingCategory(cat.id)}
-                                    className="p-1 text-red-500 hover:text-red-700 text-xs font-bold"
-                                    title="Delete category"
-                                  >
-                                    🗑️
-                                  </button>
+                                  {can('billing_categories', 'delete') && (
+                                      <button
+                                        onClick={() => handleDeleteBillingCategory(cat.id)}
+                                        className="p-1 text-red-500 hover:text-red-700 text-xs font-bold"
+                                        title="Delete category"
+                                      >
+                                        🗑️
+                                      </button>
+                                  )}
                                 </td>
                               </tr>
                             ))
@@ -7371,13 +7635,15 @@ export default function Dashboard() {
                     </div>
                   )}
 
-                  <button
-                    type="submit"
-                    disabled={migrationLoading}
-                    className="px-6 py-2.5 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition disabled:opacity-50"
-                  >
-                    {migrationLoading ? 'Migrating Database...' : 'Run Migration Now'}
-                  </button>
+                  {can('migration', 'create') && (
+                      <button
+                        type="submit"
+                        disabled={migrationLoading}
+                        className="px-6 py-2.5 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition disabled:opacity-50"
+                      >
+                        {migrationLoading ? 'Migrating Database...' : 'Run Migration Now'}
+                      </button>
+                  )}
                 </form>
               </div>
             </div>
@@ -7403,13 +7669,15 @@ export default function Dashboard() {
                   >
                     <span>🔄</span> {settingsLoading ? 'Refreshing...' : 'Refresh'}
                   </button>
-                  <button
-                    onClick={handleDownloadBackup}
-                    disabled={backupLoading}
-                    className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 shadow-sm transition flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    <span>📥</span> {backupLoading ? 'Exporting...' : 'Export Backup'}
-                  </button>
+                  {can('settings', 'edit') && (
+                      <button
+                      onClick={handleDownloadBackup}
+                      disabled={backupLoading}
+                      className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 shadow-sm transition flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <span>📥</span> {backupLoading ? 'Exporting...' : 'Export Backup'}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -7658,13 +7926,15 @@ export default function Dashboard() {
                       </div>
 
                       <div className="pt-2 flex justify-end">
-                        <button
-                          type="submit"
-                          disabled={profileSaving}
-                          className="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 shadow-sm transition flex items-center gap-2 disabled:opacity-50"
-                        >
-                          <span>💾</span> {profileSaving ? 'Saving Changes...' : 'Save Profile Changes'}
-                        </button>
+                        {can('settings', 'edit') && (
+                            <button
+                              type="submit"
+                              disabled={profileSaving}
+                              className="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 shadow-sm transition flex items-center gap-2 disabled:opacity-50"
+                            >
+                              <span>💾</span> {profileSaving ? 'Saving Changes...' : 'Save Profile Changes'}
+                            </button>
+                        )}
                       </div>
                     </form>
                   </div>
@@ -7878,16 +8148,18 @@ export default function Dashboard() {
                           </div>
                         </div>
 
-                        <button
-                          type="submit"
-                          disabled={
-                            gradingSaving ||
-                            Number(gradingForm.classScore) + Number(gradingForm.examScore) !== 100
-                          }
-                          className="px-5 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 disabled:opacity-50 transition shadow-sm self-start sm:self-auto"
-                        >
-                          {gradingSaving ? 'Saving Weights...' : 'Save Grading Weights'}
-                        </button>
+                        {can('settings', 'edit') && (
+                            <button
+                              type="submit"
+                              disabled={
+                                gradingSaving ||
+                                Number(gradingForm.classScore) + Number(gradingForm.examScore) !== 100
+                              }
+                              className="px-5 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 disabled:opacity-50 transition shadow-sm self-start sm:self-auto"
+                            >
+                              {gradingSaving ? 'Saving Weights...' : 'Save Grading Weights'}
+                            </button>
+                        )}
                       </div>
                     </form>
                   </div>
@@ -7962,12 +8234,14 @@ export default function Dashboard() {
                           Standard categories available during invoice generation and bill creation.
                         </p>
                       </div>
-                      <button
-                        onClick={() => openAddListItemModal('categories')}
-                        className="px-3.5 py-1.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition flex items-center gap-1.5 self-start"
-                      >
-                        <span>➕</span> Add Category
-                      </button>
+                      {can('settings', 'edit') && (
+                          <button
+                          onClick={() => openAddListItemModal('categories')}
+                          className="px-3.5 py-1.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition flex items-center gap-1.5 self-start"
+                        >
+                          <span>➕</span> Add Category
+                        </button>
+                      )}
                     </div>
 
                     <div className="flex flex-wrap gap-2 pt-2">
@@ -7979,20 +8253,24 @@ export default function Dashboard() {
                           >
                             <span>🏷️ {cat}</span>
                             <div className="flex items-center gap-1 border-l border-slate-300 pl-1.5">
-                              <button
-                                onClick={() => openEditListItemModal('categories', cat)}
-                                className="text-slate-500 hover:text-blue-600 text-[10px]"
-                                title="Edit"
-                              >
-                                ✏️
-                              </button>
-                              <button
-                                onClick={() => handleDeleteListItem('categories', cat)}
-                                className="text-slate-500 hover:text-rose-600 text-[10px]"
-                                title="Delete"
-                              >
-                                ✕
-                              </button>
+                              {can('settings', 'edit') && (
+                                  <button
+                                  onClick={() => openEditListItemModal('categories', cat)}
+                                  className="text-slate-500 hover:text-blue-600 text-[10px]"
+                                  title="Edit"
+                                >
+                                  ✏️
+                                </button>
+                              )}
+                              {can('settings', 'edit') && (
+                                  <button
+                                  onClick={() => handleDeleteListItem('categories', cat)}
+                                  className="text-slate-500 hover:text-rose-600 text-[10px]"
+                                  title="Delete"
+                                >
+                                  ✕
+                                </button>
+                              )}
                             </div>
                           </div>
                         ))
@@ -8011,12 +8289,14 @@ export default function Dashboard() {
                           Channels supported when recording student fee payments and bursar receipts.
                         </p>
                       </div>
-                      <button
-                        onClick={() => openAddListItemModal('methods')}
-                        className="px-3.5 py-1.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition flex items-center gap-1.5 self-start"
-                      >
-                        <span>➕</span> Add Payment Method
-                      </button>
+                      {can('settings', 'edit') && (
+                          <button
+                          onClick={() => openAddListItemModal('methods')}
+                          className="px-3.5 py-1.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition flex items-center gap-1.5 self-start"
+                        >
+                          <span>➕</span> Add Payment Method
+                        </button>
+                      )}
                     </div>
 
                     <div className="flex flex-wrap gap-2 pt-2">
@@ -8028,20 +8308,24 @@ export default function Dashboard() {
                           >
                             <span>💳 {method}</span>
                             <div className="flex items-center gap-1 border-l border-emerald-300 pl-1.5">
-                              <button
-                                onClick={() => openEditListItemModal('methods', method)}
-                                className="text-emerald-600 hover:text-blue-600 text-[10px]"
-                                title="Edit"
-                              >
-                                ✏️
-                              </button>
-                              <button
-                                onClick={() => handleDeleteListItem('methods', method)}
-                                className="text-emerald-600 hover:text-rose-600 text-[10px]"
-                                title="Delete"
-                              >
-                                ✕
-                              </button>
+                              {can('settings', 'edit') && (
+                                  <button
+                                  onClick={() => openEditListItemModal('methods', method)}
+                                  className="text-emerald-600 hover:text-blue-600 text-[10px]"
+                                  title="Edit"
+                                >
+                                  ✏️
+                                </button>
+                              )}
+                              {can('settings', 'edit') && (
+                                  <button
+                                  onClick={() => handleDeleteListItem('methods', method)}
+                                  className="text-emerald-600 hover:text-rose-600 text-[10px]"
+                                  title="Delete"
+                                >
+                                  ✕
+                                </button>
+                              )}
                             </div>
                           </div>
                         ))
@@ -8097,13 +8381,15 @@ export default function Dashboard() {
                           Export a complete, self-contained JSON snapshot of all records belonging strictly to {tenant?.name || 'your institution'}.
                         </p>
                       </div>
-                      <button
-                        onClick={handleDownloadBackup}
-                        disabled={backupLoading}
-                        className="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 shadow-sm transition flex items-center gap-2 disabled:opacity-50 self-start sm:self-auto"
-                      >
-                        <span>📥</span> {backupLoading ? 'Generating Snapshot...' : 'Download JSON Backup'}
-                      </button>
+                      {can('settings', 'edit') && (
+                          <button
+                          onClick={handleDownloadBackup}
+                          disabled={backupLoading}
+                          className="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 shadow-sm transition flex items-center gap-2 disabled:opacity-50 self-start sm:self-auto"
+                        >
+                          <span>📥</span> {backupLoading ? 'Generating Snapshot...' : 'Download JSON Backup'}
+                        </button>
+                      )}
                     </div>
 
                     {/* Stats Grid */}
@@ -8270,15 +8556,17 @@ export default function Dashboard() {
                         >
                           <span>🔄</span> {gatewaysLoading ? 'Loading...' : 'Reload Config'}
                         </button>
-                        <button
-                          type="button"
-                          onClick={handleSaveGatewaySettings}
-                          disabled={gatewaysSaving}
-                          className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold shadow-sm transition flex items-center gap-2 disabled:opacity-50"
-                        >
-                          {gatewaysSaving ? <span className="animate-spin">⚙️</span> : <span>💾</span>}
-                          <span>{gatewaysSaving ? 'Saving Settings...' : 'Save All Gateways'}</span>
-                        </button>
+                        {can('settings', 'edit') && (
+                            <button
+                            type="button"
+                            onClick={handleSaveGatewaySettings}
+                            disabled={gatewaysSaving}
+                            className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold shadow-sm transition flex items-center gap-2 disabled:opacity-50"
+                          >
+                            {gatewaysSaving ? <span className="animate-spin">⚙️</span> : <span>💾</span>}
+                            <span>{gatewaysSaving ? 'Saving Settings...' : 'Save All Gateways'}</span>
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -8793,15 +9081,17 @@ export default function Dashboard() {
                     <p className="text-xs text-slate-500">
                       Settings are instantly synchronized across all student invoice payment buttons and school plan checkout flows.
                     </p>
-                    <button
-                      type="button"
-                      onClick={handleSaveGatewaySettings}
-                      disabled={gatewaysSaving}
-                      className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold shadow-sm transition flex items-center justify-center gap-2 disabled:opacity-50"
-                    >
-                      {gatewaysSaving ? <span className="animate-spin">⚙️</span> : <span>💾</span>}
-                      <span>{gatewaysSaving ? 'Saving Configurations...' : 'Save Payment Gateways'}</span>
-                    </button>
+                    {can('settings', 'edit') && (
+                        <button
+                        type="button"
+                        onClick={handleSaveGatewaySettings}
+                        disabled={gatewaysSaving}
+                        className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold shadow-sm transition flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {gatewaysSaving ? <span className="animate-spin">⚙️</span> : <span>💾</span>}
+                        <span>{gatewaysSaving ? 'Saving Configurations...' : 'Save Payment Gateways'}</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -8824,12 +9114,14 @@ export default function Dashboard() {
                   >
                     <span>🔄</span> Import from Sheets
                   </button>
-                  <button
-                    onClick={openAddTeacherModal}
-                    className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
-                  >
-                    <span>➕</span> Add Teacher
-                  </button>
+                  {can('teachers', 'create') && (
+                      <button
+                      onClick={openAddTeacherModal}
+                      className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
+                    >
+                      <span>➕</span> Add Teacher
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -8873,12 +9165,14 @@ export default function Dashboard() {
                                   <div className="text-3xl">👨‍🏫</div>
                                   <p className="font-semibold text-slate-700">No teachers added yet.</p>
                                   <p className="text-xs text-slate-400">Click &ldquo;Add Teacher&rdquo; to get started, or import from Google Sheets.</p>
-                                  <button
-                                    onClick={openAddTeacherModal}
-                                    className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
-                                  >
-                                    + Add First Teacher
-                                  </button>
+                                  {can('teachers', 'create') && (
+                                      <button
+                                      onClick={openAddTeacherModal}
+                                      className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                                    >
+                                      + Add First Teacher
+                                    </button>
+                                  )}
                                 </div>
                               ) : (
                                 'No teachers match your search.'
@@ -8894,20 +9188,24 @@ export default function Dashboard() {
                               <td className="py-3 px-4 text-slate-600">{t.className || '—'}</td>
                               <td className="py-3 px-4 text-slate-600">{t.academicYear || '—'}</td>
                               <td className="py-3 px-4 text-center">
-                                <button
-                                  onClick={() => openEditTeacherModal(t)}
-                                  className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
-                                  title="Edit teacher"
-                                >
-                                  ✏️
-                                </button>
-                                <button
-                                  onClick={() => openDeleteTeacherModal(t)}
-                                  className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
-                                  title="Delete teacher"
-                                >
-                                  🗑️
-                                </button>
+                                {can('teachers', 'edit') && (
+                                    <button
+                                    onClick={() => openEditTeacherModal(t)}
+                                    className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                                    title="Edit teacher"
+                                  >
+                                    ✏️
+                                  </button>
+                                )}
+                                {can('teachers', 'delete') && (
+                                    <button
+                                    onClick={() => openDeleteTeacherModal(t)}
+                                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
+                                    title="Delete teacher"
+                                  >
+                                    🗑️
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           ))
@@ -9074,12 +9372,14 @@ export default function Dashboard() {
                   >
                     <span>🔄</span> Import from Sheets
                   </button>
-                  <button
-                    onClick={openAddUserModal}
-                    className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold text-sm hover:bg-indigo-700 shadow-sm transition flex items-center gap-2 self-start"
-                  >
-                    <span>➕</span> Add User
-                  </button>
+                  {can('users', 'create') && (
+                      <button
+                      onClick={openAddUserModal}
+                      className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold text-sm hover:bg-indigo-700 shadow-sm transition flex items-center gap-2 self-start"
+                    >
+                      <span>➕</span> Add User
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -9132,12 +9432,14 @@ export default function Dashboard() {
                                   <div className="text-3xl">👥</div>
                                   <p className="font-semibold text-slate-700">No users found.</p>
                                   <p className="text-xs text-slate-400">Click &ldquo;Add User&rdquo; to create the first account or import from Sheets.</p>
-                                  <button
-                                    onClick={openAddUserModal}
-                                    className="mt-1 px-4 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700"
-                                  >
-                                    + Add First User
-                                  </button>
+                                  {can('users', 'create') && (
+                                      <button
+                                      onClick={openAddUserModal}
+                                      className="mt-1 px-4 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700"
+                                    >
+                                      + Add First User
+                                    </button>
+                                  )}
                                 </div>
                               ) : (
                                 'No users match your search query.'
@@ -9194,20 +9496,24 @@ export default function Dashboard() {
                                   </span>
                                 </td>
                                 <td className="py-3 px-4 text-center">
-                                  <button
-                                    onClick={() => openEditUserModal(u)}
-                                    className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
-                                    title="Edit user"
-                                  >
-                                    ✏️
-                                  </button>
-                                  <button
-                                    onClick={() => openDeleteUserModal(u)}
-                                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
-                                    title="Delete user"
-                                  >
-                                    🗑️
-                                  </button>
+                                  {can('users', 'edit') && (
+                                      <button
+                                      onClick={() => openEditUserModal(u)}
+                                      className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                                      title="Edit user"
+                                    >
+                                      ✏️
+                                    </button>
+                                  )}
+                                  {can('users', 'delete') && (
+                                      <button
+                                      onClick={() => openDeleteUserModal(u)}
+                                      className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
+                                      title="Delete user"
+                                    >
+                                      🗑️
+                                    </button>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -9431,12 +9737,14 @@ export default function Dashboard() {
                   >
                     <span>🔄</span> Import from Sheets
                   </button>
-                  <button
-                    onClick={openAddParentModal}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700 shadow-sm transition flex items-center gap-2 self-start"
-                  >
-                    <span>➕</span> Create Mapping
-                  </button>
+                  {can('parents', 'create') && (
+                      <button
+                      onClick={openAddParentModal}
+                      className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700 shadow-sm transition flex items-center gap-2 self-start"
+                    >
+                      <span>➕</span> Create Mapping
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -9489,12 +9797,14 @@ export default function Dashboard() {
                                   <div className="text-3xl">👨‍👩‍👧‍👦</div>
                                   <p className="font-semibold text-slate-700">No parent mappings found.</p>
                                   <p className="text-xs text-slate-400">Click &ldquo;Create Mapping&rdquo; to link a parent to a pupil or import from Sheets.</p>
-                                  <button
-                                    onClick={openAddParentModal}
-                                    className="mt-1 px-4 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
-                                  >
-                                    + Create First Mapping
-                                  </button>
+                                  {can('parents', 'create') && (
+                                      <button
+                                      onClick={openAddParentModal}
+                                      className="mt-1 px-4 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
+                                    >
+                                      + Create First Mapping
+                                    </button>
+                                  )}
                                 </div>
                               ) : (
                                 'No parent mappings match your search query.'
@@ -9549,20 +9859,24 @@ export default function Dashboard() {
                                   )}
                                 </td>
                                 <td className="py-3 px-4 text-center">
-                                  <button
-                                    onClick={() => openEditParentModal(p)}
-                                    className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
-                                    title="Edit mapping"
-                                  >
-                                    ✏️
-                                  </button>
-                                  <button
-                                    onClick={() => openDeleteParentModal(p)}
-                                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
-                                    title="Delete mapping"
-                                  >
-                                    🗑️
-                                  </button>
+                                  {can('parents', 'edit') && (
+                                      <button
+                                      onClick={() => openEditParentModal(p)}
+                                      className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                                      title="Edit mapping"
+                                    >
+                                      ✏️
+                                    </button>
+                                  )}
+                                  {can('parents', 'delete') && (
+                                      <button
+                                      onClick={() => openDeleteParentModal(p)}
+                                      className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
+                                      title="Delete mapping"
+                                    >
+                                      🗑️
+                                    </button>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -9802,24 +10116,52 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <p className="text-sm text-slate-500">
-                    Manage system access levels, capability scopes, and permitted actions for {tenant?.name}.
+                    Build each role's permitted actions from the sidebar pages — exactly what is checked is exactly what that role will see.
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setActiveTab('migration')}
-                    className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs hover:bg-slate-200 transition flex items-center gap-2"
-                  >
-                    <span>🔄</span> Import from Sheets
-                  </button>
-                  <button
-                    onClick={openAddPermissionModal}
-                    className="px-4 py-2 rounded-xl bg-purple-600 text-white font-semibold text-sm hover:bg-purple-700 shadow-sm transition flex items-center gap-2 self-start"
-                  >
-                    <span>➕</span> Add Permission
-                  </button>
+                  {can('migration') && (
+                      <button
+                        onClick={() => setActiveTab('migration')}
+                        className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold text-xs hover:bg-slate-200 transition flex items-center gap-2"
+                      >
+                        <span>🔄</span> Import from Sheets
+                      </button>
+                  )}
+                  {isAdminUser && (
+                    <button
+                      onClick={openAddPermissionModal}
+                      className="px-4 py-2 rounded-xl bg-purple-600 text-white font-semibold text-sm hover:bg-purple-700 shadow-sm transition flex items-center gap-2 self-start"
+                    >
+                      <span>➕</span> Add Permission
+                    </button>
+                  )}
                 </div>
               </div>
+
+              {/* Roles without a policy keep full access */}
+              {!permissionLoading && unmanagedRoles.length > 0 && (
+                <div className="p-3 rounded-xl text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 flex items-start justify-between gap-3">
+                  <span>
+                    ⚠️ No permission policy defined for{' '}
+                    {unmanagedRoles.map((r, i) => (
+                      <span key={r.value}>
+                        {i > 0 && ', '}
+                        <strong>{r.label}</strong>
+                      </span>
+                    ))}
+                    . These roles currently see <strong>every page</strong>. Add a policy to restrict them.
+                  </span>
+                  {isAdminUser && (
+                    <button
+                      onClick={openAddPermissionModal}
+                      className="shrink-0 px-3 py-1 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 transition"
+                    >
+                      + Add Policy
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* Notice */}
               {permissionNotice && (
@@ -9852,9 +10194,9 @@ export default function Dashboard() {
                     <table className="w-full text-left text-sm">
                       <thead className="bg-slate-50 text-slate-600 text-xs uppercase border-b border-slate-200">
                         <tr>
-                          <th className="py-3 px-4 w-48">Role Name</th>
-                          <th className="py-3 px-4 w-48">Access Level</th>
-                          <th className="py-3 px-4">Permitted Actions</th>
+                          <th className="py-3 px-4 w-48">Role</th>
+                          <th className="py-3 px-4 w-44">Access Level</th>
+                          <th className="py-3 px-4">Visible Pages &amp; Permitted Actions</th>
                           <th className="py-3 px-4 text-center w-28">Actions</th>
                         </tr>
                       </thead>
@@ -9865,14 +10207,16 @@ export default function Dashboard() {
                               {permissions.length === 0 ? (
                                 <div className="space-y-3">
                                   <div className="text-3xl">🛡️</div>
-                                  <p className="font-semibold text-slate-700">No permission roles defined.</p>
-                                  <p className="text-xs text-slate-400">Click &ldquo;Add Permission&rdquo; to configure role policies or import from Sheets.</p>
-                                  <button
-                                    onClick={openAddPermissionModal}
-                                    className="mt-1 px-4 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-semibold hover:bg-purple-700"
-                                  >
-                                    + Add First Permission
-                                  </button>
+                                  <p className="font-semibold text-slate-700">No permission policies defined.</p>
+                                  <p className="text-xs text-slate-400">Click &ldquo;Add Permission&rdquo; to build a role policy from the sidebar pages — every role currently sees everything.</p>
+                                  {isAdminUser && (
+                                    <button
+                                      onClick={openAddPermissionModal}
+                                      className="mt-1 px-4 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-semibold hover:bg-purple-700"
+                                    >
+                                      + Add First Permission
+                                    </button>
+                                  )}
                                 </div>
                               ) : (
                                 'No permissions match your search query.'
@@ -9895,34 +10239,97 @@ export default function Dashboard() {
                               badgeClass = 'bg-indigo-100 text-indigo-800';
                             }
 
+                            const rowPolicy = parsePermPolicy(p.actions);
+                            const rowPages = rowPolicy
+                              ? PERM_PAGES.filter((pg) => (rowPolicy[pg.key] || []).length > 0)
+                              : [];
+                            const isLegacyPolicy = !rowPolicy;
+                            const isOwnRole = p.role.trim().toUpperCase() === (user?.role || '').toUpperCase();
+
                             return (
-                              <tr key={p.id} className="hover:bg-slate-50/50">
-                                <td className="py-3 px-4 font-bold text-slate-900">
-                                  {p.role}
+                              <tr key={p.id} className="hover:bg-slate-50/50 align-top">
+                                <td className="py-3 px-4">
+                                  <div className="font-bold text-slate-900 flex items-center gap-2">
+                                    {permRoleLabel(p.role)}
+                                    {isOwnRole && (
+                                      <span
+                                        className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 border border-purple-200"
+                                        title="This is the policy applied to your own account"
+                                      >
+                                        You
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[11px] text-slate-400 font-mono mt-0.5">{p.role}</div>
                                 </td>
                                 <td className="py-3 px-4">
                                   <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${badgeClass}`}>
                                     {p.accessLevel}
                                   </span>
                                 </td>
-                                <td className="py-3 px-4 text-slate-700 text-xs leading-relaxed">
-                                  {p.actions}
+                                <td className="py-3 px-4">
+                                  {isLegacyPolicy ? (
+                                    <p className="text-slate-500 text-xs italic leading-relaxed" title="Legacy free-text policy — edit it to convert to the page checkbox builder">
+                                      {p.actions || '—'}
+                                      <span className="block not-italic text-[10px] text-amber-600 font-semibold mt-1">
+                                        Legacy free-text policy — edit to rebuild with page checkboxes.
+                                      </span>
+                                    </p>
+                                  ) : (
+                                    <div className="space-y-1.5">
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {rowPages.length === 0 && (
+                                          <span className="text-xs text-slate-400 italic">No pages — this role sees nothing.</span>
+                                        )}
+                                        {rowPages.map((pg) => {
+                                          const acts = rowPolicy[pg.key] || [];
+                                          return (
+                                            <span
+                                              key={pg.key}
+                                              title={`${pg.label}: ${acts.map((a) => PERM_ACTION_LABELS[a]).join(', ')}`}
+                                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-700 border border-slate-200"
+                                            >
+                                              <span>{pg.icon}</span>
+                                              {pg.label}
+                                              {acts.length > 1 && (
+                                                <span className="text-purple-600 font-bold">
+                                                  {acts
+                                                    .filter((a) => a !== 'view')
+                                                    .map((a) => a[0].toUpperCase())
+                                                    .join('·')}
+                                                </span>
+                                              )}
+                                            </span>
+                                          );
+                                        })}
+                                      </div>
+                                      <p className="text-[11px] text-slate-400 font-medium">
+                                        {rowPages.length} of {PERM_PAGES.length} sidebar pages
+                                      </p>
+                                    </div>
+                                  )}
                                 </td>
                                 <td className="py-3 px-4 text-center">
-                                  <button
-                                    onClick={() => openEditPermissionModal(p)}
-                                    className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
-                                    title="Edit permission"
-                                  >
-                                    ✏️
-                                  </button>
-                                  <button
-                                    onClick={() => openDeletePermissionModal(p)}
-                                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
-                                    title="Delete permission"
-                                  >
-                                    🗑️
-                                  </button>
+                                  {isAdminUser ? (
+                                    <>
+                                      <button
+                                        onClick={() => openEditPermissionModal(p)}
+                                        className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                                        title="Edit permission"
+                                      >
+                                        ✏️
+                                      </button>
+                                      <button
+                                        onClick={() => openDeletePermissionModal(p)}
+                                        className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
+                                        title="Delete permission"
+                                      >
+                                        🗑️
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 font-semibold">View only</span>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -9934,36 +10341,58 @@ export default function Dashboard() {
                 )}
               </div>
 
-              {/* ADD / EDIT PERMISSION MODAL */}
+              {/* ADD / EDIT PERMISSION MODAL — page-based checkbox builder */}
               {showPermissionModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
-                  <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl flex flex-col overflow-hidden">
-                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
-                      <h3 className="text-base font-bold text-slate-900">
-                        {editingPermission ? 'Edit Permission' : 'Add New Permission'}
-                      </h3>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+                  <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh]">
+                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center gap-4 shrink-0">
+                      <div>
+                        <h3 className="text-base font-bold text-slate-900">
+                          {editingPermission ? 'Edit Permission Policy' : 'Add New Permission Policy'}
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Check the sidebar pages this role can see and what they can do on each — what is checked is exactly what they get.
+                        </p>
+                      </div>
                       <button
                         onClick={() => setShowPermissionModal(false)}
-                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none"
+                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none shrink-0"
                       >
                         &times;
                       </button>
                     </div>
-                    <form onSubmit={handlePermissionFormSubmit}>
-                      <div className="px-6 py-5 space-y-4">
-                        <div className="grid grid-cols-2 gap-4">
+                    <form onSubmit={handlePermissionFormSubmit} className="flex flex-col min-h-0 flex-1">
+                      <div className="px-6 py-5 space-y-5 overflow-y-auto">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div>
                             <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">
-                              Role Name *
+                              System Role *
                             </label>
-                            <input
-                              type="text"
+                            <select
                               required
-                              value={permissionForm.role}
+                              value={PERM_ROLES.some((r) => r.value === permissionForm.role) ? permissionForm.role : ''}
                               onChange={(e) => setPermissionForm({ ...permissionForm, role: e.target.value })}
-                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-                              placeholder="e.g. Headmaster"
-                            />
+                              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white"
+                            >
+                              <option value="" disabled>
+                                Select a role…
+                              </option>
+                              {PERM_ROLES.map((r) => (
+                                <option key={r.value} value={r.value}>
+                                  {r.label} — {r.description}
+                                </option>
+                              ))}
+                              {editingPermission && !PERM_ROLES.some((r) => r.value === permissionForm.role) && permissionForm.role && (
+                                <option value={permissionForm.role}>
+                                  {permissionForm.role} (legacy — choose a system role)
+                                </option>
+                              )}
+                            </select>
+                            {permissionForm.role && permissionForm.role === user?.role && (
+                              <p className="text-[11px] text-amber-600 font-semibold mt-1.5">
+                                ⚠️ You are editing the policy for your own role — unchecking pages hides them from your own sidebar too.
+                              </p>
+                            )}
                           </div>
 
                           <div>
@@ -9984,18 +10413,147 @@ export default function Dashboard() {
                           </div>
                         </div>
 
-                        <div>
-                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">
-                            Permitted Actions *
-                          </label>
-                          <textarea
-                            required
-                            rows={3}
-                            value={permissionForm.actions}
-                            onChange={(e) => setPermissionForm({ ...permissionForm, actions: e.target.value })}
-                            className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
-                            placeholder="e.g. View academic records, enter terminal grades, print report sheets..."
-                          />
+                        {permissionFormLegacyText && (
+                          <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 font-medium">
+                            This policy used legacy free-text actions: &ldquo;{permissionFormLegacyText}&rdquo;. Rebuild it below with the page
+                            checkboxes.
+                          </div>
+                        )}
+
+                        {/* Matrix toolbar */}
+                        <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-600 uppercase tracking-wide">
+                              Permitted Actions *
+                            </label>
+                            <p className="text-[11px] text-slate-500 mt-0.5">
+                              {permCheckedPages.length} of {PERM_PAGES.length} pages visible — only checked pages appear in this role&apos;s sidebar.
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={permSelectAll}
+                              className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 text-xs font-bold hover:bg-slate-100 transition"
+                            >
+                              Select All
+                            </button>
+                            <button
+                              type="button"
+                              onClick={permClearAll}
+                              className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 text-xs font-bold hover:bg-slate-100 transition"
+                            >
+                              Clear All
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Page groups — mirrors the sidebar sections */}
+                        <div className="space-y-4">
+                          {PERM_SECTIONS.map((section) => {
+                            const sectionPages = PERM_PAGES.filter((p) => p.section === section.key);
+                            if (sectionPages.length === 0) return null;
+                            const allChecked = sectionPages.every(
+                              (p) => (permissionForm.checks[p.key] || []).length === p.actions.length
+                            );
+                            const someChecked = sectionPages.some((p) => (permissionForm.checks[p.key] || []).length > 0);
+                            return (
+                              <div key={section.key} className="border border-slate-200 rounded-xl overflow-hidden">
+                                {/* Section header */}
+                                <div className="bg-slate-50 border-b border-slate-200 px-4 py-2.5 flex items-center justify-between gap-3">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <span className="text-base">{section.icon}</span>
+                                    <div className="min-w-0">
+                                      <span className="text-xs font-black text-slate-700 uppercase tracking-wider">
+                                        {section.label}
+                                      </span>
+                                      <p className="text-[10px] text-slate-400 truncate">{section.description}</p>
+                                    </div>
+                                  </div>
+                                  <label className="flex items-center gap-1.5 cursor-pointer shrink-0" title="Toggle every page in this group">
+                                    <input
+                                      type="checkbox"
+                                      checked={allChecked}
+                                      ref={(el) => {
+                                        if (el) el.indeterminate = someChecked && !allChecked;
+                                      }}
+                                      onChange={() => togglePermSection(section.key)}
+                                      className="h-4 w-4 accent-purple-600 cursor-pointer"
+                                    />
+                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">All</span>
+                                  </label>
+                                </div>
+
+                                {/* Column headers */}
+                                <div className="grid grid-cols-[minmax(0,1fr)_repeat(4,64px)] sm:grid-cols-[minmax(0,1fr)_repeat(4,84px)] items-center px-4 py-1.5 border-b border-slate-100 bg-white">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Sidebar Page</span>
+                                  {(['view', 'create', 'edit', 'delete'] as PermAction[]).map((a) => (
+                                    <span key={a} className="text-[10px] font-bold text-slate-400 uppercase tracking-wider text-center">
+                                      {a === 'view' ? 'See' : a === 'create' ? 'Add' : a === 'edit' ? 'Edit' : 'Delete'}
+                                    </span>
+                                  ))}
+                                </div>
+
+                                {/* Page rows */}
+                                <div className="divide-y divide-slate-100">
+                                  {sectionPages.map((page) => {
+                                    const checked = permissionForm.checks[page.key] || [];
+                                    const canSee = checked.includes('view');
+                                    return (
+                                      <div
+                                        key={page.key}
+                                        className={`grid grid-cols-[minmax(0,1fr)_repeat(4,64px)] sm:grid-cols-[minmax(0,1fr)_repeat(4,84px)] items-center px-4 py-2.5 transition ${
+                                          canSee ? 'bg-white' : 'bg-slate-50/60'
+                                        }`}
+                                      >
+                                        <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                                          <span className={`text-base shrink-0 ${canSee ? '' : 'grayscale opacity-50'}`}>{page.icon}</span>
+                                          <div className="min-w-0">
+                                            <span
+                                              className={`text-sm font-semibold block truncate ${
+                                                canSee ? 'text-slate-800' : 'text-slate-400'
+                                              }`}
+                                            >
+                                              {page.label}
+                                            </span>
+                                            {page.hint && (
+                                              <span className="text-[10px] text-slate-400 block leading-tight mt-0.5">{page.hint}</span>
+                                            )}
+                                          </div>
+                                        </div>
+                                        {(['view', 'create', 'edit', 'delete'] as PermAction[]).map((action) => {
+                                          const available = page.actions.includes(action);
+                                          const isChecked = checked.includes(action);
+                                          return (
+                                            <div key={action} className="flex items-center justify-center">
+                                              {available ? (
+                                                <input
+                                                  type="checkbox"
+                                                  checked={isChecked}
+                                                  onChange={() => togglePermCheck(page.key, action)}
+                                                  className="h-4 w-4 accent-purple-600 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                                                  disabled={!canSee && action !== 'view'}
+                                                  title={
+                                                    action === 'view'
+                                                      ? `Can see the ${page.label} page (sidebar)`
+                                                      : `${PERM_ACTION_LABELS[action]} on ${page.label}`
+                                                  }
+                                                />
+                                              ) : (
+                                                <span className="text-slate-300 text-xs" title="Not applicable to this page">
+                                                  —
+                                                </span>
+                                              )}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
 
                         {permissionFormError && (
@@ -10004,23 +10562,29 @@ export default function Dashboard() {
                           </p>
                         )}
                       </div>
-                      <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                        <button
-                          type="button"
-                          onClick={() => setShowPermissionModal(false)}
-                          className="px-4 py-2 rounded-xl bg-slate-200 text-slate-600 font-semibold text-sm hover:bg-slate-300 transition"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="submit"
-                          disabled={permissionFormLoading}
-                          className="px-5 py-2 rounded-xl bg-purple-600 text-white font-semibold text-sm hover:bg-purple-700 transition disabled:opacity-50"
-                        >
-                          {permissionFormLoading
-                            ? editingPermission ? 'Updating...' : 'Saving...'
-                            : editingPermission ? 'Update Permission' : 'Save Permission'}
-                        </button>
+                      <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between gap-3 shrink-0">
+                        <p className="text-[11px] text-slate-500 hidden sm:block">
+                          {permRoleLabel(permissionForm.role) || 'This role'} will see{' '}
+                          <strong className="text-slate-700">{permCheckedPages.length}</strong> of {PERM_PAGES.length} sidebar pages.
+                        </p>
+                        <div className="flex justify-end gap-3 ml-auto">
+                          <button
+                            type="button"
+                            onClick={() => setShowPermissionModal(false)}
+                            className="px-4 py-2 rounded-xl bg-slate-200 text-slate-600 font-semibold text-sm hover:bg-slate-300 transition"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={permissionFormLoading}
+                            className="px-5 py-2 rounded-xl bg-purple-600 text-white font-semibold text-sm hover:bg-purple-700 transition disabled:opacity-50"
+                          >
+                            {permissionFormLoading
+                              ? editingPermission ? 'Updating...' : 'Saving...'
+                              : editingPermission ? 'Update Permission' : 'Save Permission'}
+                          </button>
+                        </div>
                       </div>
                     </form>
                   </div>
@@ -10087,12 +10651,14 @@ export default function Dashboard() {
                   >
                     <span>🔄</span> Import from Sheets
                   </button>
-                  <button
-                    onClick={openAddSubjectModal}
-                    className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
-                  >
-                    <span>➕</span> Add Subject
-                  </button>
+                  {can('subjects', 'create') && (
+                      <button
+                      onClick={openAddSubjectModal}
+                      className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
+                    >
+                      <span>➕</span> Add Subject
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -10160,12 +10726,14 @@ export default function Dashboard() {
                                   <p className="text-xs text-slate-400">
                                     Click &ldquo;Add Subject&rdquo; to get started, or import from Google Sheets.
                                   </p>
-                                  <button
-                                    onClick={openAddSubjectModal}
-                                    className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
-                                  >
-                                    + Add First Subject
-                                  </button>
+                                  {can('subjects', 'create') && (
+                                      <button
+                                      onClick={openAddSubjectModal}
+                                      className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                                    >
+                                      + Add First Subject
+                                    </button>
+                                  )}
                                 </div>
                               ) : (
                                 'No subjects match your search.'
@@ -10192,20 +10760,24 @@ export default function Dashboard() {
                                 </span>
                               </td>
                               <td className="py-3 px-4 text-center">
-                                <button
-                                  onClick={() => openEditSubjectModal(s)}
-                                  className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
-                                  title="Edit subject"
-                                >
-                                  ✏️
-                                </button>
-                                <button
-                                  onClick={() => openDeleteSubjectModal(s)}
-                                  className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
-                                  title="Delete subject"
-                                >
-                                  🗑️
-                                </button>
+                                {can('subjects', 'edit') && (
+                                    <button
+                                    onClick={() => openEditSubjectModal(s)}
+                                    className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                                    title="Edit subject"
+                                  >
+                                    ✏️
+                                  </button>
+                                )}
+                                {can('subjects', 'delete') && (
+                                    <button
+                                    onClick={() => openDeleteSubjectModal(s)}
+                                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base ml-1"
+                                    title="Delete subject"
+                                  >
+                                    🗑️
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           ))
@@ -10385,9 +10957,11 @@ export default function Dashboard() {
                   <h1 className="text-2xl font-bold text-slate-900">Student Course Enrollments</h1>
                   <p className="text-sm text-slate-500">Track pupil subject enrollments, completion statuses, and grade assignments.</p>
                 </div>
-                <button onClick={() => setShowEnrollModal(true)} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition">
-                  ➕ Enroll Student
-                </button>
+                {can('enrollments', 'create') && (
+                    <button onClick={() => setShowEnrollModal(true)} className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 transition">
+                    ➕ Enroll Student
+                  </button>
+                )}
               </div>
 
               <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-4 shadow-sm">
@@ -10401,9 +10975,11 @@ export default function Dashboard() {
                   </p>
                 </div>
                 <div className="flex justify-center gap-3 pt-2">
-                  <button onClick={() => setActiveTab('students')} className="px-4 py-2 rounded-xl bg-teal-600 text-white font-semibold text-xs hover:bg-teal-700 transition">
-                    View Enrolled Students ({stats?.studentCount || 0})
-                  </button>
+                  {can('students') && (
+                      <button onClick={() => setActiveTab('students')} className="px-4 py-2 rounded-xl bg-teal-600 text-white font-semibold text-xs hover:bg-teal-700 transition">
+                        View Enrolled Students ({stats?.studentCount || 0})
+                      </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -10432,12 +11008,14 @@ export default function Dashboard() {
                   >
                     Sync from Sheets
                   </button>
-                  <button
-                    onClick={openMarkAttendanceModal}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold transition shadow-sm flex items-center gap-1.5"
-                  >
-                    <span>+</span> Mark Attendance
-                  </button>
+                  {can('attendance', 'create') && (
+                      <button
+                      onClick={openMarkAttendanceModal}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold transition shadow-sm flex items-center gap-1.5"
+                    >
+                      <span>+</span> Mark Attendance
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -10625,7 +11203,7 @@ export default function Dashboard() {
                         ? 'No records match the current filters. Try changing or clearing your search options.'
                         : 'No daily attendance records have been marked yet. Click "+ Mark Attendance" to begin.'}
                     </p>
-                    {!attendanceSearchQuery && !attendanceDateFilter && (
+                    {!attendanceSearchQuery && !attendanceDateFilter && can('attendance', 'create') && (
                       <button
                         onClick={openMarkAttendanceModal}
                         className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold transition"
@@ -10700,20 +11278,24 @@ export default function Dashboard() {
                               </td>
                               <td className="py-3 px-4 text-right">
                                 <div className="flex items-center justify-end gap-1.5">
-                                  <button
-                                    onClick={() => openEditAttendanceModal(a)}
-                                    className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold text-xs transition"
-                                    title="Edit record"
-                                  >
-                                    ✏️
-                                  </button>
-                                  <button
-                                    onClick={() => openDeleteAttendanceModal(a)}
-                                    className="px-2.5 py-1 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 font-semibold text-xs transition"
-                                    title="Delete record"
-                                  >
-                                    🗑️
-                                  </button>
+                                  {can('attendance', 'edit') && (
+                                      <button
+                                      onClick={() => openEditAttendanceModal(a)}
+                                      className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold text-xs transition"
+                                      title="Edit record"
+                                    >
+                                      ✏️
+                                    </button>
+                                  )}
+                                  {can('attendance', 'delete') && (
+                                      <button
+                                      onClick={() => openDeleteAttendanceModal(a)}
+                                      className="px-2.5 py-1 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 font-semibold text-xs transition"
+                                      title="Delete record"
+                                    >
+                                      🗑️
+                                    </button>
+                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -11109,12 +11691,14 @@ export default function Dashboard() {
                   >
                     <span>🔄</span> Import from Sheets
                   </button>
-                  <button
-                    onClick={openAddYearModal}
-                    className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
-                  >
-                    <span>➕</span> Add Academic Year
-                  </button>
+                  {can('academic_years', 'create') && (
+                      <button
+                      onClick={openAddYearModal}
+                      className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 shadow-sm transition flex items-center gap-2 self-start"
+                    >
+                      <span>➕</span> Add Academic Year
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -11174,12 +11758,14 @@ export default function Dashboard() {
                         <div className="text-3xl">🗓️</div>
                         <p className="font-semibold text-slate-700">No academic years found.</p>
                         <p className="text-xs text-slate-400">Click &ldquo;Add Academic Year&rdquo; to create your first session.</p>
-                        <button
-                          onClick={openAddYearModal}
-                          className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
-                        >
-                          + Add First Academic Year
-                        </button>
+                        {can('academic_years', 'create') && (
+                            <button
+                            onClick={openAddYearModal}
+                            className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                          >
+                            + Add First Academic Year
+                          </button>
+                        )}
                       </>
                     ) : (
                       'No academic years match your search.'
@@ -11213,20 +11799,24 @@ export default function Dashboard() {
                           >
                             {y.status === 'Inactive' ? 'Inactive' : 'Active'}
                           </span>
-                          <button
-                            onClick={() => openEditYearModal(y)}
-                            className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
-                            title="Edit academic year"
-                          >
-                            ✏️
-                          </button>
-                          <button
-                            onClick={() => openDeleteYearModal(y)}
-                            className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base"
-                            title="Delete academic year"
-                          >
-                            🗑️
-                          </button>
+                          {can('academic_years', 'edit') && (
+                              <button
+                              onClick={() => openEditYearModal(y)}
+                              className="p-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition text-base"
+                              title="Edit academic year"
+                            >
+                              ✏️
+                            </button>
+                          )}
+                          {can('academic_years', 'delete') && (
+                              <button
+                              onClick={() => openDeleteYearModal(y)}
+                              className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition text-base"
+                              title="Delete academic year"
+                            >
+                              🗑️
+                            </button>
+                          )}
                         </div>
                       </li>
                     ))}
@@ -11264,12 +11854,14 @@ export default function Dashboard() {
                   <p className="text-sm text-slate-500">Terminal and continuous assessment records, WAEC/GES 9-point grading scale, and rankings.</p>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    onClick={openAddPerformanceModal}
-                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
-                  >
-                    + Add Performance Record
-                  </button>
+                  {can('performance', 'create') && (
+                      <button
+                      onClick={openAddPerformanceModal}
+                      className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
+                    >
+                      + Add Performance Record
+                    </button>
+                  )}
                   <button
                     onClick={() => setShowBulkPerformanceModal(true)}
                     className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-600 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
@@ -11478,7 +12070,7 @@ export default function Dashboard() {
                         ? 'No records match your active search filters. Try adjusting your filters above.'
                         : 'No student exam scores or assessments have been recorded yet. Click "+ Add Assessment Record" to get started.'}
                     </p>
-                    {!performanceSearchQuery && !performanceClassFilter && (
+                    {!performanceSearchQuery && !performanceClassFilter && can('performance', 'create') && (
                       <button
                         onClick={openAddPerformanceModal}
                         className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition"
@@ -11583,20 +12175,24 @@ export default function Dashboard() {
                               </td>
                               <td className="py-3 px-4 text-right">
                                 <div className="flex items-center justify-end gap-1.5">
-                                  <button
-                                    onClick={() => openEditPerformanceModal(p)}
-                                    className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold text-xs transition"
-                                    title="Edit record"
-                                  >
-                                    ✏️
-                                  </button>
-                                  <button
-                                    onClick={() => openDeletePerformanceModal(p)}
-                                    className="px-2.5 py-1 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 font-semibold text-xs transition"
-                                    title="Delete record"
-                                  >
-                                    🗑️
-                                  </button>
+                                  {can('performance', 'edit') && (
+                                      <button
+                                      onClick={() => openEditPerformanceModal(p)}
+                                      className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold text-xs transition"
+                                      title="Edit record"
+                                    >
+                                      ✏️
+                                    </button>
+                                  )}
+                                  {can('performance', 'delete') && (
+                                      <button
+                                      onClick={() => openDeletePerformanceModal(p)}
+                                      className="px-2.5 py-1 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 font-semibold text-xs transition"
+                                      title="Delete record"
+                                    >
+                                      🗑️
+                                    </button>
+                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -12378,12 +12974,14 @@ export default function Dashboard() {
                   >
                     <span>⚡</span> Generate Class Invoices
                   </button>
-                  <button
-                    onClick={openAddInvoiceModal}
-                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
-                  >
-                    <span>+</span> Create Invoice
-                  </button>
+                  {can('invoices', 'create') && (
+                      <button
+                      onClick={openAddInvoiceModal}
+                      className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
+                    >
+                      <span>+</span> Create Invoice
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -12573,12 +13171,14 @@ export default function Dashboard() {
                     </p>
                     {!invoiceSearchQuery && !invoiceClassFilter && (
                       <div className="flex justify-center gap-3 pt-1">
-                        <button
-                          onClick={openAddInvoiceModal}
-                          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition"
-                        >
-                          + Create First Invoice
-                        </button>
+                        {can('invoices', 'create') && (
+                            <button
+                            onClick={openAddInvoiceModal}
+                            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition"
+                          >
+                            + Create First Invoice
+                          </button>
+                        )}
                         <button
                           onClick={openBulkInvoiceModal}
                           className="px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold transition"
@@ -12696,20 +13296,24 @@ export default function Dashboard() {
                               </td>
                               <td className="py-3 px-4 text-right">
                                 <div className="flex items-center justify-end gap-1.5">
-                                  <button
-                                    onClick={() => openEditInvoiceModal(inv)}
-                                    className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold text-xs transition"
-                                    title="Edit invoice"
-                                  >
-                                    ✏️
-                                  </button>
-                                  <button
-                                    onClick={() => openDeleteInvoiceModal(inv)}
-                                    className="px-2.5 py-1 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 font-semibold text-xs transition"
-                                    title="Delete invoice"
-                                  >
-                                    🗑️
-                                  </button>
+                                  {can('invoices', 'edit') && (
+                                      <button
+                                      onClick={() => openEditInvoiceModal(inv)}
+                                      className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 font-semibold text-xs transition"
+                                      title="Edit invoice"
+                                    >
+                                      ✏️
+                                    </button>
+                                  )}
+                                  {can('invoices', 'delete') && (
+                                      <button
+                                      onClick={() => openDeleteInvoiceModal(inv)}
+                                      className="px-2.5 py-1 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 font-semibold text-xs transition"
+                                      title="Delete invoice"
+                                    >
+                                      🗑️
+                                    </button>
+                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -13515,29 +14119,31 @@ export default function Dashboard() {
                   >
                     <span>📊</span> Class Breakdown
                   </button>
-                  <button
-                    onClick={() => {
-                      setPaymentForm({
-                        studentId: '',
-                        invoiceId: '',
-                        academicYearId: academicYears.find((y) => y.status === 'Active')?.id || (academicYears[0]?.id || ''),
-                        term: 'Term 1',
-                        paymentDate: new Date().toISOString().split('T')[0],
-                        amountPaid: '',
-                        paymentMethod: 'Cash',
-                        referenceNo: '',
-                        notes: '',
-                      });
-                      setPaySelectedClassId('');
-                      setPayClassStudents([]);
-                      setPayStudentInvoices([]);
-                      setPaymentFormError('');
-                      setShowAddPaymentModal(true);
-                    }}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-semibold text-xs hover:bg-emerald-700 transition shadow-sm flex items-center gap-1.5"
-                  >
-                    <span>+</span> Record Payment
-                  </button>
+                  {can('payments', 'create') && (
+                      <button
+                      onClick={() => {
+                        setPaymentForm({
+                          studentId: '',
+                          invoiceId: '',
+                          academicYearId: academicYears.find((y) => y.status === 'Active')?.id || (academicYears[0]?.id || ''),
+                          term: 'Term 1',
+                          paymentDate: new Date().toISOString().split('T')[0],
+                          amountPaid: '',
+                          paymentMethod: 'Cash',
+                          referenceNo: '',
+                          notes: '',
+                        });
+                        setPaySelectedClassId('');
+                        setPayClassStudents([]);
+                        setPayStudentInvoices([]);
+                        setPaymentFormError('');
+                        setShowAddPaymentModal(true);
+                      }}
+                      className="px-4 py-2 rounded-xl bg-emerald-600 text-white font-semibold text-xs hover:bg-emerald-700 transition shadow-sm flex items-center gap-1.5"
+                    >
+                      <span>+</span> Record Payment
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -13897,20 +14503,24 @@ export default function Dashboard() {
                                 >
                                   🧾
                                 </button>
-                                <button
-                                  onClick={() => openEditPaymentModal(pay)}
-                                  title="Edit Payment"
-                                  className="p-1.5 rounded-lg text-slate-600 hover:text-blue-600 hover:bg-blue-50 transition"
-                                >
-                                  ✏️
-                                </button>
-                                <button
-                                  onClick={() => openDeletePaymentModal(pay)}
-                                  title="Delete Payment"
-                                  className="p-1.5 rounded-lg text-slate-600 hover:text-red-600 hover:bg-red-50 transition"
-                                >
-                                  🗑️
-                                </button>
+                                {can('payments', 'edit') && (
+                                    <button
+                                    onClick={() => openEditPaymentModal(pay)}
+                                    title="Edit Payment"
+                                    className="p-1.5 rounded-lg text-slate-600 hover:text-blue-600 hover:bg-blue-50 transition"
+                                  >
+                                    ✏️
+                                  </button>
+                                )}
+                                {can('payments', 'delete') && (
+                                    <button
+                                    onClick={() => openDeletePaymentModal(pay)}
+                                    title="Delete Payment"
+                                    className="p-1.5 rounded-lg text-slate-600 hover:text-red-600 hover:bg-red-50 transition"
+                                  >
+                                    🗑️
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>

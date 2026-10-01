@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
+import { isAdminRole, validatePermActionsInput } from '@/lib/permissions';
 
 export async function GET(req: NextRequest) {
   try {
@@ -54,14 +55,27 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized or expired session.' }, { status: 401 });
     }
 
+    // Only administrators may define permission policies.
+    if (!isAdminRole(session.role)) {
+      return NextResponse.json(
+        { error: 'Only School Administrators can manage permission policies.' },
+        { status: 403 }
+      );
+    }
+
     const body = await req.json();
     const { role, accessLevel, actions } = body;
 
-    if (!role || !accessLevel || !actions) {
+    if (!role || !accessLevel) {
       return NextResponse.json(
-        { error: 'Role name, access level, and permitted actions are required.' },
+        { error: 'Role name and access level are required.' },
         { status: 400 }
       );
+    }
+
+    const validated = validatePermActionsInput(actions);
+    if (!validated.ok) {
+      return NextResponse.json({ error: validated.error }, { status: 400 });
     }
 
     const cleanRole = role.trim();
@@ -86,7 +100,7 @@ export async function POST(req: NextRequest) {
         tenantId: session.tenantId,
         role: cleanRole,
         accessLevel: accessLevel.trim(),
-        actions: actions.trim(),
+        actions: validated.actions,
       },
     });
 
