@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
 import { getClientIp, logAuditEvent } from '@/lib/audit';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 type SubjectStatus = 'ACTIVE' | 'INACTIVE';
 
@@ -50,13 +52,7 @@ export async function PUT(
     }
 
     // Verify the subject belongs to this tenant
-    const existing = await prisma.subject.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Subject not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('subject', id, session.tenantId);
 
     const subjectName = String(name).trim();
 
@@ -119,14 +115,11 @@ export async function PUT(
       subject: updatedSubject,
     });
   } catch (error: any) {
-    console.error('Error updating subject:', error);
-    if (error.code === 'P2002') {
-      return NextResponse.json(
-        { error: 'A subject with this name already exists.' },
-        { status: 409 }
-      );
+    if ((error as any).code === 'P2002') {
+      return NextResponse.json({ error: 'A subject with this name already exists.' }, { status: 409 });
     }
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -149,13 +142,7 @@ export async function DELETE(
     const { id } = await params;
 
     // Verify the subject belongs to this tenant
-    const existing = await prisma.subject.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Subject not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('subject', id, session.tenantId);
 
     // Enrollment.subjectId is ON DELETE SET NULL, so count the links that will be unlinked
     const enrollmentCount = await prisma.enrollment.count({
@@ -191,8 +178,8 @@ export async function DELETE(
       unlinkedEnrollments: enrollmentCount,
     });
   } catch (error: any) {
-    console.error('Error deleting subject:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
