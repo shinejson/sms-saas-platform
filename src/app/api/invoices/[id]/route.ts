@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
 import { InvoiceStatus } from '@prisma/client';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 function calculateInvoiceStatus(totalAmount: number, paidAmount: number): InvoiceStatus {
   const balance = Math.max(0, totalAmount - paidAmount);
@@ -30,13 +32,8 @@ export async function PUT(
     const { id } = await params;
     const tenantId = session.tenantId;
 
-    const existing = await prisma.invoice.findFirst({
-      where: { id, tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Invoice not found or access denied.' }, { status: 404 });
-    }
+    // Verify tenant ownership - throws if not found or wrong tenant
+    const existing = await verifyTenantOwnership('invoice', id, tenantId);
 
     const body = await req.json();
     const {
@@ -118,8 +115,8 @@ export async function PUT(
       message: `Invoice ${updated.invoiceNumber} updated successfully.`,
     });
   } catch (error: any) {
-    console.error('Error updating invoice:', error);
-    return NextResponse.json({ error: error.message || 'Server error updating invoice.' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -139,13 +136,8 @@ export async function DELETE(
     const { id } = await params;
     const tenantId = session.tenantId;
 
-    const existing = await prisma.invoice.findFirst({
-      where: { id, tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Invoice not found or access denied.' }, { status: 404 });
-    }
+    // Verify tenant ownership - throws if not found or wrong tenant
+    const existing = await verifyTenantOwnership('invoice', id, tenantId);
 
     await prisma.invoice.delete({
       where: { id },
@@ -156,7 +148,7 @@ export async function DELETE(
       message: `Invoice ${existing.invoiceNumber} deleted successfully.`,
     });
   } catch (error: any) {
-    console.error('Error deleting invoice:', error);
-    return NextResponse.json({ error: error.message || 'Server error deleting invoice.' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }

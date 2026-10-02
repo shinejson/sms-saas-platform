@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 export async function PUT(
   req: NextRequest,
@@ -32,13 +34,7 @@ export async function PUT(
     const trimmedName = name.trim();
 
     // Verify the class belongs to this tenant
-    const existing = await prisma.class.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Class not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('class', id, session.tenantId);
 
     // Check for duplicate name in the same tenant excluding this class
     const duplicate = await prisma.class.findFirst({
@@ -84,14 +80,8 @@ export async function PUT(
       class: updatedClass,
     });
   } catch (error: any) {
-    console.error('Error updating class:', error);
-    if (error.code === 'P2002') {
-      return NextResponse.json(
-        { error: 'A class with this name already exists in your school.' },
-        { status: 409 }
-      );
-    }
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -114,8 +104,10 @@ export async function DELETE(
     const { id } = await params;
 
     // Verify class belongs to tenant and count enrolled students
-    const existing = await prisma.class.findFirst({
-      where: { id, tenantId: session.tenantId },
+    const existing = await verifyTenantOwnership<any>('class', id, session.tenantId);
+    
+    const classWithCount = await prisma.class.findUnique({
+      where: { id },
       include: {
         _count: {
           select: {
@@ -125,15 +117,15 @@ export async function DELETE(
       },
     });
 
-    if (!existing) {
+    if (!classWithCount) {
       return NextResponse.json({ error: 'Class not found.' }, { status: 404 });
     }
 
     // Safety guard: cannot delete class if enrolled students > 0 (GAS line 3407)
-    if (existing._count.students > 0) {
+    if (classWithCount._count.students > 0) {
       return NextResponse.json(
         {
-          error: `Cannot delete "${existing.name}" because ${existing._count.students} student(s) are currently assigned to this class. Move or remove students before deleting this class.`,
+          error: `Cannot delete "${classWithCount.name}" because ${classWithCount._count.students} student(s) are currently assigned to this class. Move or remove students before deleting this class.`,
         },
         { status: 400 }
       );
@@ -143,10 +135,10 @@ export async function DELETE(
 
     return NextResponse.json({
       success: true,
-      message: `Class "${existing.name}" deleted successfully.`,
+      message: `Class "${classWithCount.name}" deleted successfully.`,
     });
   } catch (error: any) {
-    console.error('Error deleting class:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }

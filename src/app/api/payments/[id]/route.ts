@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
 import { InvoiceStatus } from '@prisma/client';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 export async function PUT(
   req: NextRequest,
@@ -19,8 +21,12 @@ export async function PUT(
     const { id } = await params;
     const tenantId = session.tenantId;
 
-    const existing = await prisma.payment.findFirst({
-      where: { id, tenantId },
+    // Verify tenant ownership - throws if not found or wrong tenant
+    const existing = await verifyTenantOwnership<any>('payment', id, tenantId);
+    
+    // Fetch full details
+    const fullPayment = await prisma.payment.findUnique({
+      where: { id },
       include: {
         invoice: {
           include: {
@@ -31,8 +37,8 @@ export async function PUT(
       },
     });
 
-    if (!existing) {
-      return NextResponse.json({ error: 'Payment record not found or access denied.' }, { status: 404 });
+    if (!fullPayment) {
+      return NextResponse.json({ error: 'Payment not found.' }, { status: 404 });
     }
 
     const body = await req.json();
@@ -44,7 +50,7 @@ export async function PUT(
       notes,
     } = body;
 
-    let parsedAmount = Number(existing.amount);
+    let parsedAmount = Number(fullPayment.amount);
     if (amountPaid !== undefined) {
       parsedAmount = parseFloat(amountPaid);
       if (isNaN(parsedAmount) || parsedAmount <= 0) {
@@ -81,12 +87,12 @@ export async function PUT(
 
       // Recalculate invoice
       const allPayments = await tx.payment.findMany({
-        where: { invoiceId: existing.invoiceId, tenantId },
+        where: { invoiceId: fullPayment.invoiceId, tenantId },
         select: { amount: true },
       });
 
       const totalPaid = allPayments.reduce((sum, p) => sum + Number(p.amount), 0);
-      const invoiceTotal = Number(existing.invoice.totalAmount);
+      const invoiceTotal = Number(fullPayment.invoice.totalAmount);
       const newBalance = Math.max(0, invoiceTotal - totalPaid);
 
       let newStatus: InvoiceStatus = InvoiceStatus.UNPAID;
@@ -164,11 +170,8 @@ export async function PUT(
       },
     });
   } catch (error: any) {
-    console.error('Error updating payment:', error);
-    return NextResponse.json(
-      { error: 'Failed to update payment', details: error.message },
-      { status: 500 }
-    );
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -188,15 +191,19 @@ export async function DELETE(
     const { id } = await params;
     const tenantId = session.tenantId;
 
-    const existing = await prisma.payment.findFirst({
-      where: { id, tenantId },
+    // Verify tenant ownership - throws if not found or wrong tenant
+    const existing = await verifyTenantOwnership<any>('payment', id, tenantId);
+    
+    // Fetch invoice details
+    const fullPayment = await prisma.payment.findUnique({
+      where: { id },
       include: {
         invoice: true,
       },
     });
 
-    if (!existing) {
-      return NextResponse.json({ error: 'Payment not found or access denied.' }, { status: 404 });
+    if (!fullPayment) {
+      return NextResponse.json({ error: 'Payment not found.' }, { status: 404 });
     }
 
     await prisma.$transaction(async (tx) => {
@@ -207,12 +214,12 @@ export async function DELETE(
 
       // Recalculate invoice balances
       const remainingPayments = await tx.payment.findMany({
-        where: { invoiceId: existing.invoiceId, tenantId },
+        where: { invoiceId: fullPayment.invoiceId, tenantId },
         select: { amount: true },
       });
 
       const totalPaid = remainingPayments.reduce((sum, p) => sum + Number(p.amount), 0);
-      const invoiceTotal = Number(existing.invoice.totalAmount);
+      const invoiceTotal = Number(fullPayment.invoice.totalAmount);
       const newBalance = Math.max(0, invoiceTotal - totalPaid);
 
       let newStatus: InvoiceStatus = InvoiceStatus.UNPAID;
@@ -223,7 +230,7 @@ export async function DELETE(
       }
 
       await tx.invoice.update({
-        where: { id: existing.invoiceId },
+        where: { id: fullPayment.invoiceId },
         data: {
           paidAmount: totalPaid,
           balance: newBalance,
@@ -237,10 +244,7 @@ export async function DELETE(
       message: `Payment ${existing.receiptNumber} deleted and invoice balance recalculated.`,
     });
   } catch (error: any) {
-    console.error('Error deleting payment:', error);
-    return NextResponse.json(
-      { error: 'Failed to delete payment', details: error.message },
-      { status: 500 }
-    );
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }

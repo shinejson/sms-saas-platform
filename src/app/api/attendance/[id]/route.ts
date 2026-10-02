@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
 import { AttendanceStatus } from '@prisma/client';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 export async function PUT(
   req: NextRequest,
@@ -23,13 +25,7 @@ export async function PUT(
     const body = await req.json();
     const { status, notes, date, term } = body;
 
-    const existing = await prisma.attendance.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Attendance record not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('attendance', id, session.tenantId);
 
     const updated = await prisma.attendance.update({
       where: { id },
@@ -71,8 +67,8 @@ export async function PUT(
       attendance: updated,
     });
   } catch (error: any) {
-    console.error('Error updating attendance:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -94,13 +90,7 @@ export async function DELETE(
 
     const { id } = await params;
 
-    const existing = await prisma.attendance.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Attendance record not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('attendance', id, session.tenantId);
 
     await prisma.attendance.delete({ where: { id } });
 
@@ -109,7 +99,7 @@ export async function DELETE(
       message: 'Attendance record deleted successfully.',
     });
   } catch (error: any) {
-    console.error('Error deleting attendance:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import { hashPassword, generateToken } from '@/lib/auth';
+import { hashPassword, generateToken, validatePasswordStrength } from '@/lib/auth';
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,6 +18,15 @@ export async function POST(req: NextRequest) {
     if (!schoolName || !subdomain || !adminEmail || !adminPassword) {
       return NextResponse.json(
         { error: 'Please provide all required fields' },
+        { status: 400 }
+      );
+    }
+
+    // Validate password strength
+    const passwordValidation = validatePasswordStrength(adminPassword);
+    if (!passwordValidation.valid) {
+      return NextResponse.json(
+        { error: 'Password does not meet security requirements', details: passwordValidation.errors },
         { status: 400 }
       );
     }

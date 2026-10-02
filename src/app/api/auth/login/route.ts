@@ -2,6 +2,65 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyPassword, generateToken } from '@/lib/auth';
 
+// In-memory rate limiting for login attempts
+interface RateLimitEntry {
+  attempts: number;
+  resetTime: number;
+}
+
+const loginAttempts = new Map<string, RateLimitEntry>();
+
+// Clean up expired entries periodically
+function cleanExpiredEntries() {
+  const now = Date.now();
+  for (const [key, entry] of loginAttempts.entries()) {
+    if (now > entry.resetTime) {
+      loginAttempts.delete(key);
+    }
+  }
+}
+
+function checkRateLimit(key: string): { allowed: boolean; retryAfter?: number } {
+  cleanExpiredEntries();
+  
+  const now = Date.now();
+  const entry = loginAttempts.get(key);
+  
+  if (!entry) {
+    return { allowed: true };
+  }
+  
+  if (now > entry.resetTime) {
+    loginAttempts.delete(key);
+    return { allowed: true };
+  }
+  
+  if (entry.attempts >= 5) {
+    const retryAfter = Math.ceil((entry.resetTime - now) / 1000);
+    return { allowed: false, retryAfter };
+  }
+  
+  return { allowed: true };
+}
+
+function recordFailedAttempt(key: string) {
+  const now = Date.now();
+  const entry = loginAttempts.get(key);
+  
+  if (!entry || now > entry.resetTime) {
+    loginAttempts.set(key, {
+      attempts: 1,
+      resetTime: now + 15 * 60 * 1000, // 15 minutes
+    });
+  } else {
+    entry.attempts++;
+  }
+}
+
+function clearRateLimit(key: string) {
+  loginAttempts.delete(key);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { email, password, subdomain } = await req.json();
@@ -11,6 +70,25 @@ export async function POST(req: NextRequest) {
     }
 
     const cleanEmail = email.toLowerCase().trim();
+    
+    // Rate limiting key: email + IP address
+    const ip = req.headers.get('x-forwarded-for')?.split(',')[0] || req.headers.get('x-real-ip') || 'unknown';
+    const rateLimitKey = `login:${cleanEmail}:${ip}`;
+    
+    // Check rate limit
+    const rateLimit = checkRateLimit(rateLimitKey);
+    if (!rateLimit.allowed) {
+      console.warn(`[Security] Rate limit exceeded for ${cleanEmail} from ${ip}`);
+      return NextResponse.json(
+        { error: `Too many login attempts. Please try again in ${rateLimit.retryAfter} seconds.` },
+        { 
+          status: 429,
+          headers: {
+            'Retry-After': String(rateLimit.retryAfter),
+          },
+        }
+      );
+    }
 
     // Single query: look up user (+ tenant) scoped to subdomain when provided,
     // falling back to a global email search so Super Admin can always log in.
@@ -43,6 +121,7 @@ export async function POST(req: NextRequest) {
     });
 
     if (!user) {
+      recordFailedAttempt(rateLimitKey);
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
     }
 
@@ -55,8 +134,12 @@ export async function POST(req: NextRequest) {
 
     const isValid = await verifyPassword(password, user.passwordHash);
     if (!isValid) {
+      recordFailedAttempt(rateLimitKey);
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
     }
+
+    // Successful login - clear rate limit
+    clearRateLimit(rateLimitKey);
 
     const token = generateToken({
       userId: user.id,
