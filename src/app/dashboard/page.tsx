@@ -21,6 +21,12 @@ import {
   type PermAction,
   type PermPolicy,
 } from '@/lib/permissions';
+import {
+  DEPARTMENTS,
+  DEPARTMENT_RESOURCES,
+  getResourceByTab,
+} from '@/lib/departments';
+import DepartmentWorkspace from './departments/DepartmentWorkspace';
 
 interface TenantInfo {
   id: string;
@@ -590,11 +596,114 @@ const SubscriptionIcon = ({ className = 'w-5 h-5' }: { className?: string }) => 
   </svg>
 );
 
+const ChevronDownIcon = ({ className = 'w-4 h-4' }: { className?: string }) => (
+  <svg className={className} fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+  </svg>
+);
+
+/**
+ * Sidebar icons for the Operations & Marketing department pages, keyed by the
+ * resource key declared in `src/lib/departments.ts`.
+ */
+const DEPARTMENT_ICON_PATHS: Record<string, string[]> = {
+  assets: ['M3 7l9-4 9 4-9 4-9-4z', 'M3 7v10l9 4 9-4V7', 'M12 11v10'],
+  requisitions: ['M9 4h6v3H9z', 'M9 5.5H6.5v15h11v-15H15', 'M9 12h6', 'M9 16h4'],
+  'work-orders': [
+    'M12 9.2a2.8 2.8 0 100 5.6 2.8 2.8 0 000-5.6z',
+    'M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21',
+    'M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6',
+  ],
+  transport: ['M5 17V7a2 2 0 012-2h10a2 2 0 012 2v10', 'M3.5 17h17', 'M7 20h2M15 20h2', 'M6.5 9.5h11', 'M8 13.2h1.6M14.4 13.2H16'],
+  vendors: ['M4.5 9.5h15V20h-15z', 'M3 9.5L4.6 5h14.8L21 9.5', 'M9.5 20v-5.5h5V20'],
+  campaigns: ['M4 10v4h3.2L14 18V6L7.2 10H4z', 'M17.5 9.2a3.6 3.6 0 010 5.6'],
+  leads: [
+    'M12 3.2a8.8 8.8 0 100 17.6 8.8 8.8 0 000-17.6z',
+    'M12 7.8a4.2 4.2 0 100 8.4 4.2 4.2 0 000-8.4z',
+    'M12 11.4a.6.6 0 100 1.2.6.6 0 000-1.2z',
+  ],
+  announcements: ['M12 3.2a6 6 0 00-6 6v3.6L4 16h16l-2-3.2V9.2a6 6 0 00-6-6z', 'M10 19a2 2 0 004 0'],
+  events: ['M4.5 6.2h15V20.5h-15z', 'M4.5 10.4h15', 'M8.5 3.5v4M15.5 3.5v4', 'M12 13l1 2 2.2.3-1.6 1.5.4 2.2-2-1-2 1 .4-2.2L8.8 15.3 11 15l1-2z'],
+  referrals: [
+    'M17.8 4.6a2.1 2.1 0 100 4.2 2.1 2.1 0 000-4.2z',
+    'M6.2 9.9a2.1 2.1 0 100 4.2 2.1 2.1 0 000-4.2z',
+    'M17.8 15.2a2.1 2.1 0 100 4.2 2.1 2.1 0 000-4.2z',
+    'M8.1 11l7.6-3.6M8.1 13l7.6 3.6',
+  ],
+};
+
+const DepartmentNavIcon = ({
+  resourceKey,
+  className = 'w-5 h-5',
+}: {
+  resourceKey: string;
+  className?: string;
+}) => (
+  <svg className={className} fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+    {(DEPARTMENT_ICON_PATHS[resourceKey] ?? []).map((d, i) => (
+      <path key={i} strokeLinecap="round" strokeLinejoin="round" d={d} />
+    ))}
+  </svg>
+);
+
+/**
+ * Collapsible sidebar section. Every group is a dropdown that starts CLOSED;
+ * a blue dot marks a collapsed group that contains the page you are on.
+ */
+const SidebarGroup = ({
+  label,
+  groupKey,
+  open,
+  hasActive,
+  onToggle,
+  children,
+}: {
+  label: string;
+  groupKey: string;
+  open: boolean;
+  hasActive: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) => (
+  <div>
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      aria-controls={`nav-group-${groupKey}`}
+      className="group w-full flex items-center justify-between gap-2 px-1 pb-1.5 mb-2 border-b border-slate-100 transition"
+    >
+      <span
+        className={`flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-colors ${
+          open || hasActive ? 'text-slate-600' : 'text-slate-400'
+        } group-hover:text-slate-700`}
+      >
+        {label}
+        {!open && hasActive && <span className="w-1.5 h-1.5 rounded-full bg-blue-600" />}
+      </span>
+      <ChevronDownIcon
+        className={`w-3.5 h-3.5 shrink-0 text-slate-400 group-hover:text-slate-600 transition-transform duration-200 ${
+          open ? 'rotate-180' : ''
+        }`}
+      />
+    </button>
+    {open && (
+      <div id={`nav-group-${groupKey}`} className="space-y-0.5 pb-1 animate-in fade-in slide-in-from-top-1 duration-150">
+        {children}
+      </div>
+    )}
+  </div>
+);
+
 export default function Dashboard() {
   const [token, setToken] = useState<string | null>(null);
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
   const [user, setUser] = useState<UserInfo | null>(null);
   const [activeTab, setActiveTab] = useState<string>('overview');
+  // Sidebar dropdown groups (PEOPLE / ACADEMICS / FINANCE / OPERATIONS /
+  // MARKETING / SYSTEM). Every group is CLOSED by default — a group only opens
+  // when the user clicks it, or when navigation lands on a page inside it.
+  const [openNavGroups, setOpenNavGroups] = useState<Record<string, boolean>>({});
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Stats & Students state
@@ -1243,6 +1352,16 @@ export default function Dashboard() {
     return Array.isArray(acts) && acts.includes(action);
   };
 
+  /** Sidebar group (permission section) that owns a dashboard tab. */
+  const navGroupForTab = (tab: string): string | null =>
+    PERM_PAGES.find((page) => page.tab === tab)?.section ?? null;
+
+  const toggleNavGroup = (groupKey: string) =>
+    setOpenNavGroups((prev) => ({ ...prev, [groupKey]: !prev[groupKey] }));
+
+  /** The Operations / Marketing page currently open, if any. */
+  const activeDepartmentResource = getResourceByTab(activeTab);
+
   // Load the current user's effective permission policy
   const fetchPermPolicy = useCallback(async () => {
     if (!token) return;
@@ -1264,6 +1383,16 @@ export default function Dashboard() {
   useEffect(() => {
     fetchPermPolicy();
   }, [fetchPermPolicy]);
+
+  // Reveal the sidebar group that owns the page we just navigated to.
+  useEffect(() => {
+    const group = navGroupForTab(activeTab);
+    // 'general' (Dashboard) is a standalone button, not a dropdown — so on a
+    // fresh load every collapsible group stays closed.
+    if (!group || group === 'general') return;
+    setOpenNavGroups((prev) => (prev[group] ? prev : { ...prev, [group]: true }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // Guard: if the active tab (or billing sub-tab) is not permitted for this
   // user's role, redirect to the first page they are allowed to see.
@@ -5275,6 +5404,15 @@ export default function Dashboard() {
     { id: 'users', name: 'System Users', desc: 'Staff logins, administrators & credentials', icon: '👥', tab: 'users', perm: 'users' },
     { id: 'permissions', name: 'Permissions Matrix', desc: 'Role capabilities & administrative rights', icon: '🛡️', tab: 'permissions', perm: 'permissions' },
     { id: 'parents', name: 'Parent Portals', desc: 'Student-guardian mapping & portal access', icon: '👨‍👩‍👧', tab: 'parents', perm: 'parents' },
+    // Operations & Marketing department pages (from the department registry)
+    ...DEPARTMENT_RESOURCES.map((resource) => ({
+      id: resource.tab,
+      name: resource.title,
+      desc: resource.description,
+      icon: resource.icon,
+      tab: resource.tab,
+      perm: resource.permKey,
+    })),
   ].filter((p) => can(p.perm, 'view'));
 
   const searchNormalized = searchQuery.trim().toLowerCase();
@@ -5518,11 +5656,13 @@ export default function Dashboard() {
             { id: 'parents', label: 'Parents', Icon: ParentsIcon, perm: 'parents' },
             { id: 'permissions', label: 'Permissions', Icon: PermissionsIcon, perm: 'permissions' },
           ].some((item) => can(item.perm)) && (
-            <div>
-              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
-                PEOPLE
-              </div>
-              <div className="space-y-0.5">
+            <SidebarGroup
+              label="PEOPLE"
+              groupKey="people"
+              open={!!openNavGroups.people}
+              hasActive={navGroupForTab(activeTab) === 'people'}
+              onToggle={() => toggleNavGroup('people')}
+            >
                 {[
                   { id: 'students', label: 'Students', Icon: StudentsIcon, perm: 'students' },
                   { id: 'teachers', label: 'Teachers', Icon: TeachersIcon, perm: 'teachers' },
@@ -5551,8 +5691,7 @@ export default function Dashboard() {
                       </button>
                     );
                   })}
-              </div>
-            </div>
+            </SidebarGroup>
           )}
 
           {/* ACADEMICS */}
@@ -5564,11 +5703,13 @@ export default function Dashboard() {
             { id: 'academic-years', perm: 'academic_years' },
             { id: 'performance', perm: 'performance' },
           ].some((item) => can(item.perm)) && (
-            <div>
-              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
-                ACADEMICS
-              </div>
-              <div className="space-y-0.5">
+            <SidebarGroup
+              label="ACADEMICS"
+              groupKey="academics"
+              open={!!openNavGroups.academics}
+              hasActive={navGroupForTab(activeTab) === 'academics'}
+              onToggle={() => toggleNavGroup('academics')}
+            >
                 {[
                   { id: 'classes', label: 'Classes', Icon: ClassesIcon, perm: 'classes' },
                   { id: 'subjects', label: 'Subject', Icon: SubjectIcon, perm: 'subjects' },
@@ -5598,17 +5739,18 @@ export default function Dashboard() {
                       </button>
                     );
                   })}
-              </div>
-            </div>
+            </SidebarGroup>
           )}
 
           {/* FINANCE */}
           {(can('invoices') || can('payments') || can('billing_items') || can('billing_categories')) && (
-            <div>
-              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
-                FINANCE
-              </div>
-              <div className="space-y-0.5">
+            <SidebarGroup
+              label="FINANCE"
+              groupKey="finance"
+              open={!!openNavGroups.finance}
+              hasActive={navGroupForTab(activeTab) === 'finance'}
+              onToggle={() => toggleNavGroup('finance')}
+            >
                 {can('invoices') && (
                     <button
                       onClick={() => { setActiveTab('invoices'); setMobileMenuOpen(false); }}
@@ -5672,17 +5814,61 @@ export default function Dashboard() {
                       <span>Billing Categories</span>
                     </button>
                 )}
-              </div>
-            </div>
+            </SidebarGroup>
           )}
+
+          {/* OPERATIONS & MARKETING — rendered from the department registry
+              (src/lib/departments.ts) so new department pages appear here,
+              in the permission matrix and in the API with one config entry. */}
+          {DEPARTMENTS.map((department) => {
+            const pages = department.resources.filter((resource) => can(resource.permKey));
+            if (pages.length === 0) return null;
+            return (
+              <SidebarGroup
+                key={department.key}
+                label={department.navLabel}
+                groupKey={department.key}
+                open={!!openNavGroups[department.key]}
+                hasActive={navGroupForTab(activeTab) === department.key}
+                onToggle={() => toggleNavGroup(department.key)}
+              >
+                {pages.map((resource) => {
+                  const active = activeTab === resource.tab;
+                  return (
+                    <button
+                      key={resource.key}
+                      onClick={() => {
+                        setActiveTab(resource.tab);
+                        setMobileMenuOpen(false);
+                      }}
+                      title={resource.description}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
+                        active
+                          ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      }`}
+                    >
+                      <DepartmentNavIcon
+                        resourceKey={resource.key}
+                        className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`}
+                      />
+                      <span className="truncate">{resource.navLabel}</span>
+                    </button>
+                  );
+                })}
+              </SidebarGroup>
+            );
+          })}
 
           {/* SYSTEM */}
           {(can('subscription') || can('settings') || can('reports') || can('migration')) && (
-            <div>
-            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pb-1.5 border-b border-slate-100 mb-2 px-1">
-              SYSTEM
-            </div>
-            <div className="space-y-0.5">
+            <SidebarGroup
+              label="SYSTEM"
+              groupKey="system"
+              open={!!openNavGroups.system}
+              hasActive={navGroupForTab(activeTab) === 'system'}
+              onToggle={() => toggleNavGroup('system')}
+            >
               {can('subscription') && (
                 <button
                   onClick={() => { setActiveTab('subscription'); setMobileMenuOpen(false); }}
@@ -5750,8 +5936,7 @@ export default function Dashboard() {
                   <span>Sheets Migration</span>
                 </button>
               )}
-            </div>
-          </div>
+            </SidebarGroup>
           )}
         </div>
 
@@ -5826,28 +6011,13 @@ export default function Dashboard() {
                 </svg>
               </button>
 
-              <div className="flex items-center gap-3">
-                {/* School Logo */}
-                {tenant?.logoUrl ? (
-                  <img 
-                    src={tenant.logoUrl} 
-                    alt={tenant.name} 
-                    className="w-10 h-10 rounded-lg object-cover border border-slate-200 dark:border-slate-700 shadow-sm"
-                  />
-                ) : (
-                  <div className="w-10 h-10 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold text-lg shadow-sm">
-                    {tenant?.name?.charAt(0) || '🏫'}
-                  </div>
-                )}
-                
-                <div>
-                  <h1 className={`font-black text-lg sm:text-xl tracking-tight leading-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                    {tenant?.name || 'Dashboard'}
-                  </h1>
-                  <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} hidden sm:block truncate max-w-md`}>
-                    {tenant?.alias || 'School Management Platform'}
-                  </p>
-                </div>
+              <div>
+                <h1 className={`font-black text-lg sm:text-xl tracking-tight leading-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                  Dashboard
+                </h1>
+                <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} hidden sm:block truncate max-w-md`}>
+                  Comprehensive school management and real-time operational analytics.
+                </p>
               </div>
             </div>
 
@@ -16168,6 +16338,20 @@ export default function Dashboard() {
                 </div>
               </div>
             </div>
+          )}
+
+          {/* OPERATIONS & MARKETING DEPARTMENT PAGES
+              One generic workspace renders every department resource (assets,
+              requisitions, work orders, transport, vendors, campaigns, leads,
+              announcements, events, referrals). */}
+          {activeDepartmentResource && (
+            <DepartmentWorkspace
+              key={activeDepartmentResource.key}
+              resource={activeDepartmentResource}
+              token={token}
+              currency={tenant?.currency || 'GHS'}
+              can={can}
+            />
           )}
 
         </main>
