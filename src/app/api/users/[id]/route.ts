@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken, hashPassword } from '@/lib/auth';
 import { Role, AccountStatus } from '@prisma/client';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 export async function PUT(
   req: NextRequest,
@@ -31,13 +33,7 @@ export async function PUT(
     }
 
     // Verify user exists and belongs to the current tenant
-    const existing = await prisma.user.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'User not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('user', id, session.tenantId);
 
     // Prepare update data
     const updateData: any = {
@@ -79,14 +75,14 @@ export async function PUT(
       user: updatedUser,
     });
   } catch (error: any) {
-    console.error('Error updating user:', error);
-    if (error.code === 'P2002') {
+    if ((error as any).code === 'P2002') {
       return NextResponse.json(
         { error: 'A user with this email address already exists in this school.' },
         { status: 409 }
       );
     }
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -117,13 +113,7 @@ export async function DELETE(
     }
 
     // Verify user exists and belongs to this tenant
-    const targetUser = await prisma.user.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!targetUser) {
-      return NextResponse.json({ error: 'User not found.' }, { status: 404 });
-    }
+    const targetUser = await verifyTenantOwnership('user', id, session.tenantId);
 
     // Safety guard: cannot delete the last Admin user (matches GAS line 375)
     if (targetUser.role === Role.SCHOOL_ADMIN || targetUser.role === Role.SUPER_ADMIN) {
@@ -152,7 +142,7 @@ export async function DELETE(
       message: 'User deleted successfully.',
     });
   } catch (error: any) {
-    console.error('Error deleting user:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
