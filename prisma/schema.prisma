@@ -80,6 +80,20 @@ model Tenant {
   permissions       Permission[]
   billings          Billing[]
 
+  // Operations department
+  assets            Asset[]
+  requisitions      Requisition[]
+  workOrders        WorkOrder[]
+  transportRoutes   TransportRoute[]
+  vendors           Vendor[]
+
+  // Marketing department
+  campaigns         Campaign[]
+  leads             Lead[]
+  announcements     Announcement[]
+  marketingEvents   MarketingEvent[]
+  referrals         Referral[]
+
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 }
@@ -497,4 +511,265 @@ model Permission {
 
   @@unique([tenantId, role])
   @@index([tenantId])
+}
+
+// ============================================================================
+// OPERATIONS DEPARTMENT
+// Every model is tenant-scoped exactly like the academic & finance models:
+// `tenantId` + cascade delete + a `[tenantId, <code>]` uniqueness guarantee so
+// human-readable codes (AST-1001, WO-1001 ...) never collide across schools.
+// ============================================================================
+
+model Asset {
+  id           String    @id @default(cuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  assetTag     String
+  name         String
+  category     String    @default("Other")
+  quantity     Int       @default(1)
+  unitCost     Decimal   @default(0.00) @db.Decimal(12, 2)
+  location     String?
+  condition    String    @default("Good")
+  assignedTo   String?
+  purchaseDate DateTime?
+  status       String    @default("In Service")
+  notes        String?   @db.Text
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([tenantId, assetTag])
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model Requisition {
+  id                String    @id @default(cuid())
+  tenantId          String
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  requisitionNumber String
+  title             String
+  department        String    @default("Administration")
+  requestedBy       String?
+  itemsSummary      String?   @db.Text
+  estimatedCost     Decimal   @default(0.00) @db.Decimal(12, 2)
+  priority          String    @default("Medium")
+  status            String    @default("Pending")
+  neededBy          DateTime?
+  supplier          String?
+  notes             String?   @db.Text
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([tenantId, requisitionNumber])
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model WorkOrder {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  orderNumber String
+  title       String
+  category    String    @default("Other")
+  location    String?
+  priority    String    @default("Medium")
+  status      String    @default("Open")
+  reportedBy  String?
+  assignedTo  String?
+  reportedOn  DateTime?
+  dueDate     DateTime?
+  cost        Decimal   @default(0.00) @db.Decimal(12, 2)
+  notes       String?   @db.Text
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([tenantId, orderNumber])
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model TransportRoute {
+  id               String   @id @default(cuid())
+  tenantId         String
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  routeCode        String
+  routeName        String
+  vehicleNumber    String?
+  vehicleType      String   @default("Bus")
+  driverName       String?
+  driverPhone      String?
+  capacity         Int      @default(0)
+  studentsAssigned Int      @default(0)
+  pickupPoints     String?  @db.Text
+  fare             Decimal  @default(0.00) @db.Decimal(12, 2)
+  status           String   @default("Active")
+  notes            String?  @db.Text
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([tenantId, routeCode])
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model Vendor {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  vendorCode    String
+  name          String
+  category      String   @default("Other")
+  contactPerson String?
+  phone         String?
+  email         String?
+  address       String?
+  paymentTerms  String   @default("Cash on Delivery")
+  status        String   @default("Active")
+  notes         String?  @db.Text
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tenantId, vendorCode])
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+// ============================================================================
+// MARKETING DEPARTMENT
+// ============================================================================
+
+model Campaign {
+  id              String    @id @default(cuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  campaignCode    String
+  name            String
+  channel         String    @default("SMS")
+  objective       String    @default("Admissions Drive")
+  audience        String?
+  budget          Decimal   @default(0.00) @db.Decimal(12, 2)
+  spend           Decimal   @default(0.00) @db.Decimal(12, 2)
+  startDate       DateTime?
+  endDate         DateTime?
+  status          String    @default("Draft")
+  leadsGenerated  Int       @default(0)
+  notes           String?   @db.Text
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([tenantId, campaignCode])
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model Lead {
+  id              String    @id @default(cuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  leadCode        String
+  parentName      String
+  phone           String?
+  email           String?
+  studentName     String?
+  interestedClass String?
+  source          String    @default("Walk-in")
+  stage           String    @default("New")
+  assignedTo      String?
+  nextFollowUp    DateTime?
+  notes           String?   @db.Text
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([tenantId, leadCode])
+  @@index([tenantId])
+  @@index([tenantId, stage])
+}
+
+model Announcement {
+  id               String    @id @default(cuid())
+  tenantId         String
+  tenant           Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  announcementCode String
+  title            String
+  audience         String    @default("All Parents")
+  channel          String    @default("SMS")
+  body             String    @db.Text
+  publishAt        DateTime?
+  status           String    @default("Draft")
+  publishedBy      String?
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([tenantId, announcementCode])
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model MarketingEvent {
+  id                 String    @id @default(cuid())
+  tenantId           String
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  eventCode          String
+  name               String
+  type               String    @default("Open Day")
+  venue              String?
+  startDate          DateTime?
+  endDate            DateTime?
+  owner              String?
+  expectedAttendees  Int       @default(0)
+  actualAttendees    Int       @default(0)
+  budget             Decimal   @default(0.00) @db.Decimal(12, 2)
+  status             String    @default("Planned")
+  notes              String?   @db.Text
+
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([tenantId, eventCode])
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model Referral {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  referralCode  String
+  referrerName  String
+  referrerType  String   @default("Parent")
+  referrerPhone String?
+  prospectName  String
+  prospectClass String?
+  status        String   @default("Pending")
+  rewardType    String   @default("None")
+  rewardAmount  Decimal  @default(0.00) @db.Decimal(12, 2)
+  rewardStatus  String   @default("Not Due")
+  notes         String?  @db.Text
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tenantId, referralCode])
+  @@index([tenantId])
+  @@index([tenantId, status])
 }
