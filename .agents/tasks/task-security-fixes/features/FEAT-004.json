@@ -1,0 +1,38 @@
+{
+  "id": "FEAT-004",
+  "type": "chore",
+  "description": "Security Audit, Documentation, and Dependency Review: Run npm audit, document all security changes, update security best practices documentation, and verify no new vulnerabilities introduced. This is independent of other features and focuses on final verification and documentation.",
+  "status": "pending",
+  "steps": [
+    "1. Run npm audit and document findings: Execute 'npm audit --json > .agents/tasks/task-security-fixes/npm-audit-results.json' to capture current dependency vulnerabilities. Review output and document any high/critical issues that need addressing.",
+    "2. Update dependencies if needed: If npm audit shows fixable vulnerabilities, run 'npm audit fix' for automatic fixes. Document any vulnerabilities that cannot be auto-fixed and create follow-up tasks.",
+    "3. Create security documentation at docs/SECURITY.md: Document all implemented security measures including authentication flow (JWT + refresh tokens), rate limiting configuration, CSRF protection (origin validation), input validation (Zod schemas), tenant isolation pattern (verifyTenantOwnership), webhook signature verification, password policy (12 chars, complexity requirements), error handling (sanitization), security headers.",
+    "4. Update .env.example with security comments: Add comprehensive comments for each environment variable explaining its security purpose, how to generate secure values (e.g., openssl commands), and warnings about production configuration.",
+    "5. Create deployment security checklist at docs/DEPLOYMENT-SECURITY.md: Document pre-deployment checks - JWT_SECRET must be 64+ chars generated with openssl, database uses SSL/TLS, payment webhook secrets configured, NEXT_PUBLIC_APP_URL matches production domain, NODE_ENV=production, rate limiting configured, CORS origins restricted.",
+    "6. Add code comments to security-critical functions: Add JSDoc comments to validatePasswordStrength, verifyTenantOwnership, sanitizeError, webhook signature verification explaining security rationale and proper usage.",
+    "7. Verify no hardcoded secrets remain: Grep codebase for common secret patterns (password=, secret=, key=, token=) excluding .env.example and ensure no secrets in source code.",
+    "8. Test complete authentication flow end-to-end: Register new school → login → receive tokens → make authenticated request → refresh token → verify old token invalid after refresh → logout/revoke tokens.",
+    "9. Document remaining LOW priority issues: Create .agents/tasks/task-security-fixes/remaining-issues.md listing LOW priority items from security report (structured logging, audit trail, production mode checks) with recommendations for future implementation.",
+    "10. Final security verification checklist: Verify all CRITICAL/HIGH/MEDIUM findings from security report are resolved, all new code follows security patterns, no console.error calls leak sensitive data, all user inputs validated, all database queries use tenant isolation."
+  ],
+  "acceptance_criteria": [
+    "npm audit shows no CRITICAL or HIGH vulnerabilities (or all are documented as non-applicable)",
+    "docs/SECURITY.md exists and documents all security features comprehensively",
+    "docs/DEPLOYMENT-SECURITY.md provides complete pre-deployment security checklist",
+    ".env.example has detailed security comments for all sensitive variables",
+    "No hardcoded secrets, passwords, or API keys exist in src/ directory",
+    "All security-critical functions have JSDoc comments explaining security considerations",
+    "Complete authentication flow (register → login → refresh → API calls) works end-to-end",
+    "All findings from original security report (CRIT-001, CRIT-002, CRIT-003, HIGH-001 through HIGH-004, MED-001 through MED-004) are resolved"
+  ],
+  "verification": [
+    "Run 'npm audit' and verify output shows 0 high/critical vulnerabilities",
+    "Run 'npm run build' for final compilation check",
+    "Verify docs/SECURITY.md and docs/DEPLOYMENT-SECURITY.md exist and are comprehensive",
+    "Run 'grep -r \"password\\s*=\\s*[\\\"']\" src/' to check for hardcoded secrets",
+    "Manually test complete auth flow: register → login → refresh → authenticated API call",
+    "Review security report at .agents/tasks/security-review-report.md and confirm all CRITICAL/HIGH/MEDIUM items are addressed in code"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

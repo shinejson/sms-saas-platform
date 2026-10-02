@@ -1,0 +1,35 @@
+{
+  "id": "FEAT-002",
+  "type": "fix",
+  "description": "HIGH Priority Fixes: Tenant isolation enforcement, error sanitization, and CSRF protection. Addresses HIGH-001 (insufficient tenant isolation in [id] routes), HIGH-004 (sensitive data exposure in error messages), and CRIT-003 (missing CSRF protection). Ensures multi-tenant data security and prevents information disclosure.",
+  "status": "pending",
+  "steps": [
+    "1. Create src/lib/tenant-security.ts with verifyTenantOwnership helper: Generic function that takes (modelName: string, recordId: string, tenantId: string, prisma: PrismaClient) and returns the record only if it belongs to the tenant. Throws 404 'Record not found or access denied' if not found or wrong tenant.",
+    "2. Create src/lib/errors.ts with error sanitization utilities: Define AppError class with statusCode and internalMessage properties. Create sanitizeError(error: any, isDevelopment: boolean) that returns generic message in production, detailed stack in development. Log full errors server-side always.",
+    "3. Apply verifyTenantOwnership to src/app/api/invoices/[id]/route.ts: In PUT and DELETE handlers, replace existing 'findFirst({ where: { id, tenantId } })' with call to verifyTenantOwnership('invoice', id, session.tenantId) before any update/delete operations.",
+    "4. Apply verifyTenantOwnership to src/app/api/payments/[id]/route.ts: Check if file exists, if so apply same pattern as step 3 for PUT/DELETE operations.",
+    "5. Apply verifyTenantOwnership to src/app/api/attendance/[id]/route.ts: In PUT and DELETE handlers at lines 35 and 75, replace findFirst check with verifyTenantOwnership call.",
+    "6. Apply verifyTenantOwnership to src/app/api/performance/[id]/route.ts: In PUT and DELETE handlers at lines 33 and 93, replace findFirst check with verifyTenantOwnership call.",
+    "7. Apply verifyTenantOwnership to all other [id] routes: Check src/app/api/students/[id], src/app/api/classes/[id], src/app/api/subjects/[id], src/app/api/teachers/[id], src/app/api/parents/[id], src/app/api/academic-years/[id], src/app/api/users/[id], src/app/api/permissions/[id] - if they exist, apply the same pattern.",
+    "8. Apply sanitizeError to all catch blocks: Replace 'error.message || \"Server error\"' pattern in all API routes with sanitizeError(error, process.env.NODE_ENV === 'development'). Start with auth routes, then invoices, payments, students, attendance, performance.",
+    "9. Implement origin validation middleware: Create src/middleware.ts with Next.js middleware that validates Origin header for POST/PUT/DELETE requests. Allow origins from NEXT_PUBLIC_APP_URL and localhost:3000. Return 403 'Invalid origin' for mismatched origins. Export config with matcher '/api/:path*'.",
+    "10. Update src/lib/payment-gateways.ts error handling: Replace direct error.message forwarding at lines 180-185 and elsewhere with sanitizeError utility to prevent leaking Paystack/Flutterwave internal errors."
+  ],
+  "acceptance_criteria": [
+    "Attempting to update/delete another tenant's invoice returns 404 'Record not found or access denied'",
+    "All catch blocks return generic 'Internal error occurred' message in production (NODE_ENV=production)",
+    "Detailed error stacks only appear when NODE_ENV=development",
+    "POST requests with invalid Origin header return 403 status",
+    "All [id] routes verify tenant ownership before any modifications",
+    "Payment gateway errors don't expose API key validity or account config details to client"
+  ],
+  "verification": [
+    "Run 'npm run build' to verify TypeScript compilation",
+    "Test cross-tenant access: Obtain invoice ID from tenant A, try to update it with tenant B's JWT token - should return 404",
+    "Test error sanitization: Trigger database error (invalid classId), verify response doesn't contain 'Prisma' or file paths",
+    "Test origin validation: Send POST to /api/students with Origin: https://evil.com - should return 403",
+    "Grep for 'error.message' in src/app/api to ensure all are replaced with sanitizeError"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

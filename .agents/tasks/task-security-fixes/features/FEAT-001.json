@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-001",
+  "type": "fix",
+  "description": "CRITICAL Security Fixes: Authentication, JWT secrets, and payment webhook signature verification. Addresses CRIT-001 (unauthenticated webhook), CRIT-002 (hardcoded JWT secret with weak fallback), and HIGH-003 (weak password policy with no account lockout). These are the most urgent issues that enable authentication bypass and payment fraud.",
+  "status": "pending",
+  "steps": [
+    "1. Fix JWT secret handling in src/lib/auth.ts: Remove hardcoded fallback 'sms-saas-super-secret-jwt-key-2026', add startup validation that throws error if JWT_SECRET is missing or < 32 chars, increase bcrypt salt rounds from 10 to 12, specify HS512 algorithm in generateToken, add jti (JWT ID) claim using crypto.randomUUID() for token uniqueness.",
+    "2. Add password validation function in src/lib/auth.ts: Create validatePasswordStrength(password: string) that enforces minimum 12 characters, at least one uppercase, one lowercase, one number, and one special character. Returns { valid: boolean; errors: string[] }.",
+    "3. Apply password validation in src/app/api/auth/register-school/route.ts: Call validatePasswordStrength before hashing, return 400 with validation errors if password is weak.",
+    "4. Implement in-memory rate limiting for login in src/app/api/auth/login/route.ts: Create Map<string, { attempts: number; resetTime: number }> to track failed login attempts by email+IP. Allow 5 attempts per 15 minutes. Return 429 'Too many login attempts' if exceeded. Clear old entries on each check.",
+    "5. Add webhook signature verification to src/app/api/subscriptions/webhook/route.ts: For Paystack, verify x-paystack-signature header using HMAC SHA-512 with PAYSTACK_SECRET_KEY against raw body. For Flutterwave, verify verif-hash header. For Stripe, use stripe.webhooks.constructEvent (if stripe SDK available, otherwise manual HMAC). Reject with 401 if signature missing or invalid. Add proper error handling and logging for all webhook attempts.",
+    "6. Update .env.example: Change JWT_SECRET to 'CHANGE_ME_OR_SERVER_WILL_NOT_START' with comment explaining generation command (openssl rand -base64 64). Add PAYSTACK_WEBHOOK_SECRET, FLUTTERWAVE_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET with documentation."
+  ],
+  "acceptance_criteria": [
+    "Server fails to start with clear error message if JWT_SECRET is missing or < 32 characters",
+    "Password validation rejects weak passwords (tested with '123456', 'password') during registration",
+    "Login endpoint returns 429 after 5 failed attempts within 15 minutes for the same email",
+    "Payment webhook rejects requests without valid signature headers with 401 status",
+    "All JWT tokens include jti claim and use HS512 algorithm",
+    "Bcrypt uses 12 salt rounds for all new password hashes"
+  ],
+  "verification": [
+    "Run 'npm run build' to verify TypeScript compilation passes",
+    "Test server startup without JWT_SECRET - should fail with error message",
+    "Test registration with weak password ('test123') - should be rejected",
+    "Test login rate limiting with curl by sending 6 failed attempts - 6th should return 429",
+    "Test webhook with missing signature header - should return 401",
+    "Manually inspect JWT token payload to confirm jti claim exists"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

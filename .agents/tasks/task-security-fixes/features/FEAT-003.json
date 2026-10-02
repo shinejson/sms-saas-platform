@@ -1,0 +1,41 @@
+{
+  "id": "FEAT-003",
+  "type": "feat",
+  "description": "MEDIUM Priority Security Enhancements: Refresh token implementation, input validation with Zod, rate limiting middleware, and security headers. Addresses MED-001 (missing rate limiting), MED-002 (no input validation library), MED-003 (insecure session expiration), and MED-004 (missing security headers). Improves overall security posture without breaking existing functionality.",
+  "status": "pending",
+  "steps": [
+    "1. Install required dependencies: Run 'npm install zod rate-limiter-flexible' to add input validation and rate limiting libraries.",
+    "2. Add RefreshToken model to prisma/schema.prisma: Create model with id (cuid), userId (relation to User), tokenHash (String @unique, stores SHA256 hash), expiresAt (DateTime), createdAt (DateTime). Add refreshTokens relation to User model (User[] @relation(\"UserRefreshTokens\")). Run 'npx prisma migrate dev --name add-refresh-tokens'.",
+    "3. Implement refresh token functions in src/lib/auth.ts: Add generateAccessToken (15min expiry), generateRefreshToken (7 day expiry), storeRefreshToken (hashes and stores in DB), verifyRefreshToken (validates and returns user), revokeAllUserTokens (deletes all refresh tokens for user). Update existing generateToken to call generateAccessToken.",
+    "4. Create /api/auth/refresh endpoint at src/app/api/auth/refresh/route.ts: Accept POST with refreshToken in body. Verify token, generate new access+refresh tokens, revoke old refresh token, return new tokens. Return 401 if invalid/expired.",
+    "5. Update login route to return both tokens: Modify src/app/api/auth/login/route.ts to generate and return both accessToken (15min) and refreshToken (7 days) on successful login. Store refreshToken in database.",
+    "6. Create input validation schemas in src/lib/validation.ts: Define Zod schemas for StudentSchema (firstName, lastName, studentId, gender, dateOfBirth, classId, guardianName, guardianPhone, guardianEmail, address with proper types and limits), InvoiceSchema (studentId, academicYearId, term, totalAmount, paidAmount, dueDate with validation), PaymentSchema, AttendanceSchema, PerformanceSchema with appropriate constraints.",
+    "7. Apply Zod validation to POST routes: Update src/app/api/students/route.ts POST handler to validate body with StudentSchema.safeParse, return 400 with validation errors if invalid. Apply same pattern to src/app/api/invoices/route.ts, src/app/api/payments/route.ts, src/app/api/attendance/route.ts, src/app/api/performance/route.ts.",
+    "8. Enhance rate limiting in src/middleware.ts: Integrate rate-limiter-flexible RateLimiterMemory with tiered limits - auth endpoints (5 req/15min), read operations (100 req/min), write operations (30 req/min), webhook (10 req/min). Use user ID from JWT if available, fallback to IP. Return 429 with Retry-After header.",
+    "9. Add security headers to next.config.ts: In async headers() function, return array of security headers for all routes - X-Frame-Options: DENY, X-Content-Type-Options: nosniff, X-XSS-Protection: 1; mode=block, Strict-Transport-Security: max-age=31536000; includeSubDomains, Referrer-Policy: strict-origin-when-cross-origin, Permissions-Policy: camera=(), microphone=(), geolocation=(), Content-Security-Policy with reasonable defaults (self for scripts/styles, allow payment gateway domains for connect-src).",
+    "10. Document refresh token flow in .env.example: Add comments explaining access vs refresh token pattern, expiry times, and usage."
+  ],
+  "acceptance_criteria": [
+    "RefreshToken table exists in database with proper foreign keys to User",
+    "Login endpoint returns both accessToken and refreshToken with appropriate expiry times",
+    "/api/auth/refresh endpoint successfully exchanges valid refresh token for new access token",
+    "Expired or invalid refresh tokens are rejected with 401",
+    "All POST routes validate input with Zod and return structured validation errors",
+    "Invalid input (e.g., studentId over 50 chars, negative payment amount) is rejected with 400",
+    "Rate limiting returns 429 for excessive requests with appropriate limits per endpoint type",
+    "Security headers are present in all HTTP responses (verify with curl -I)",
+    "CSP header allows payment gateway domains (api.paystack.co, api.flutterwave.com) in connect-src"
+  ],
+  "verification": [
+    "Run 'npx prisma validate' to check schema validity",
+    "Run 'npx prisma migrate dev' to apply RefreshToken migration",
+    "Run 'npm run build' to verify TypeScript compilation",
+    "Test login - verify response contains both accessToken and refreshToken",
+    "Test /api/auth/refresh with valid refresh token - should return new tokens",
+    "Test invalid input on /api/students POST with firstName: 123 (number) - should return Zod validation error",
+    "Test rate limiting by sending 6 rapid requests to /api/auth/login - 6th should be 429",
+    "Run 'curl -I http://localhost:3000/api/students' and verify X-Frame-Options, CSP headers present"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

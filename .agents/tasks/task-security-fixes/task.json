@@ -1,0 +1,7 @@
+{
+  "task_id": "task-security-fixes",
+  "task_description": "Fix all critical, high, and medium security vulnerabilities identified in the security audit of the SMS SaaS platform",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}
