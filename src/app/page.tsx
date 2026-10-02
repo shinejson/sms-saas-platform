@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect } from "react";
+import HeroBackgroundSlider from "@/components/HeroBackgroundSlider";
 
 export default function Home() {
   const [showRegister, setShowRegister] = useState(false);
@@ -8,11 +9,39 @@ export default function Home() {
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
   const [hasActiveSession, setHasActiveSession] = useState(false);
+  const [platformLogo, setPlatformLogo] = useState<string | null>(null);
+  const [platformName, setPlatformName] = useState<string>("SMS Global Cloud");
 
   useEffect(() => {
-    if (typeof window !== "undefined" && localStorage.getItem("sms_token")) {
-      setHasActiveSession(true);
+    if (typeof window !== "undefined") {
+      if (localStorage.getItem("sms_token")) {
+        setHasActiveSession(true);
+      }
+      try {
+        const storedTenant = localStorage.getItem("sms_tenant");
+        if (storedTenant) {
+          const parsed = JSON.parse(storedTenant);
+          if (parsed.logoUrl) {
+            setPlatformLogo(parsed.logoUrl);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
     }
+
+    // Fetch official platform branding configured in owner settings
+    fetch("/api/platform/settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.logoUrl) {
+          setPlatformLogo(data.logoUrl);
+        }
+        if (data?.platformName) {
+          setPlatformName(data.platformName);
+        }
+      })
+      .catch((err) => console.error("Error loading platform settings:", err));
   }, []);
 
   const [formData, setFormData] = useState({
@@ -102,9 +131,16 @@ export default function Home() {
       <header className="sticky top-0 z-50 bg-white/90 backdrop-blur border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className="text-2xl">🏫</span>
-            <span className="font-bold text-xl tracking-tight text-blue-600">SMS Global Cloud</span>
-            <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">SaaS Platform</span>
+            {platformLogo ? (
+              <img
+                src={platformLogo}
+                alt={platformName || "School Logo"}
+                className="h-9 w-auto max-h-9 max-w-[130px] object-contain rounded"
+              />
+            ) : (
+              <span className="text-2xl">🏫</span>
+            )}
+            <span className="font-bold text-xl tracking-tight text-blue-600">{platformName}</span>
           </div>
 
           <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-slate-600">
@@ -139,54 +175,54 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Hero Section */}
+      {/* Hero Section with AI Background Slider */}
       <main className="flex-1">
-        <section className="relative overflow-hidden pt-20 pb-28 bg-gradient-to-b from-blue-50/50 via-white to-slate-50">
+        <HeroBackgroundSlider>
           <div className="max-w-5xl mx-auto px-4 text-center">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold mb-6">
+            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-xs font-semibold mb-6 backdrop-blur-md shadow-sm">
               <span>✨</span> Multi-Tenant School Management Platform
             </div>
 
-            <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight text-slate-900 mb-6 leading-tight">
-              One Cloud Platform to Run Your <span className="text-blue-600">Entire School</span>
+            <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight text-white mb-6 leading-tight drop-shadow-md">
+              One Cloud Platform to Run Your <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-sky-300 to-blue-200">Entire School</span>
             </h1>
 
-            <p className="text-lg sm:text-xl text-slate-600 max-w-3xl mx-auto mb-10 leading-relaxed">
+            <p className="text-lg sm:text-xl text-slate-200 max-w-3xl mx-auto mb-10 leading-relaxed drop-shadow">
               Student enrollment, attendance registers, subject schedules, academic year billing, and Mobile Money fee collection. Built for schools of all sizes.
             </p>
 
             <div className="flex flex-wrap items-center justify-center gap-4">
               <button
                 onClick={() => { setShowRegister(true); setShowLogin(false); }}
-                className="px-8 py-3.5 rounded-xl bg-blue-600 text-white font-semibold text-base shadow-lg shadow-blue-500/25 hover:bg-blue-700 hover:shadow-xl transition"
+                className="px-8 py-3.5 rounded-xl bg-blue-600 text-white font-semibold text-base shadow-xl shadow-blue-500/30 hover:bg-blue-500 hover:shadow-blue-500/50 hover:-translate-y-0.5 transition duration-200"
               >
                 Start Free School Trial (15 Students)
               </button>
               <a
                 href="#pricing"
-                className="px-8 py-3.5 rounded-xl bg-white border border-slate-300 text-slate-700 font-semibold text-base hover:bg-slate-50 transition"
+                className="px-8 py-3.5 rounded-xl bg-white/10 border border-white/20 text-white font-semibold text-base backdrop-blur-md hover:bg-white/20 hover:border-white/30 hover:-translate-y-0.5 transition duration-200 shadow-md"
               >
                 View Plans & Pricing
               </a>
             </div>
 
             {/* Feature highlights bar */}
-            <div className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl mx-auto text-left">
+            <div className="mt-14 grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl mx-auto text-left">
               {[
                 { icon: "🎓", title: "Student Directory", desc: "Full bio, photos & guardian records" },
                 { icon: "📅", title: "Attendance Registers", desc: "Automated daily & term roll call" },
                 { icon: "💳", title: "MoMo & Bank Billing", desc: "MTN, Telecel & Cards in GHS" },
                 { icon: "📊", title: "Academic Insights", desc: "Per-year billing & recovery rates" },
               ].map((f, i) => (
-                <div key={i} className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm">
+                <div key={i} className="p-4 rounded-xl bg-slate-900/60 border border-white/10 backdrop-blur-md shadow-xl hover:bg-slate-900/80 hover:border-blue-400/30 transition duration-200">
                   <div className="text-2xl mb-2">{f.icon}</div>
-                  <h3 className="font-semibold text-sm text-slate-900">{f.title}</h3>
-                  <p className="text-xs text-slate-500 mt-1">{f.desc}</p>
+                  <h3 className="font-semibold text-sm text-white">{f.title}</h3>
+                  <p className="text-xs text-slate-300 mt-1">{f.desc}</p>
                 </div>
               ))}
             </div>
           </div>
-        </section>
+        </HeroBackgroundSlider>
 
         {/* Live Dashboard Analytics & Charts Showcase */}
         <section id="analytics" className="py-20 bg-slate-900 text-white relative overflow-hidden">

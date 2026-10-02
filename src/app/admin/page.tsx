@@ -77,12 +77,18 @@ export default function AdminPortal() {
   const [loginError, setLoginError] = useState('');
 
   // Dashboard Data State
-  const [activeTab, setActiveTab] = useState<'overview' | 'tenants' | 'revenue' | 'admins' | 'diagnostics'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'tenants' | 'revenue' | 'admins' | 'diagnostics' | 'settings'>('overview');
   const [stats, setStats] = useState<PlatformStats | null>(null);
   const [tenants, setTenants] = useState<TenantItem[]>([]);
   const [admins, setAdmins] = useState<SuperAdminUser[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState('');
+
+  // Platform & Logo Settings State
+  const [platformLogo, setPlatformLogo] = useState<string>('');
+  const [platformBrandName, setPlatformBrandName] = useState<string>('SMS Global Cloud');
+  const [savingPlatformSettings, setSavingPlatformSettings] = useState(false);
+  const platformLogoInputRef = React.useRef<HTMLInputElement>(null);
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -136,10 +142,11 @@ export default function AdminPortal() {
     if (!token) return;
     setDataLoading(true);
     try {
-      const [statsRes, tenantsRes, adminsRes] = await Promise.all([
+      const [statsRes, tenantsRes, adminsRes, platformRes] = await Promise.all([
         fetch('/api/admin/stats', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/admin/tenants', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/admin/users', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/api/platform/settings'),
       ]);
 
       if (statsRes.ok) {
@@ -154,11 +161,58 @@ export default function AdminPortal() {
         const adminsData = await adminsRes.json();
         setAdmins(adminsData.admins);
       }
+      if (platformRes.ok) {
+        const platformData = await platformRes.json();
+        if (platformData.logoUrl) setPlatformLogo(platformData.logoUrl);
+        if (platformData.platformName) setPlatformBrandName(platformData.platformName);
+      }
     } catch (err) {
       console.error('Failed to load admin data:', err);
     } finally {
       setDataLoading(false);
     }
+  };
+
+  const handleSavePlatformSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setSavingPlatformSettings(true);
+    try {
+      const res = await fetch('/api/platform/settings', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          logoUrl: platformLogo,
+          platformName: platformBrandName,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update platform settings');
+      setFeedbackMsg('✅ Platform Logo and Brand Settings saved successfully! The logo is now live on the main website topnav.');
+      setTimeout(() => setFeedbackMsg(''), 4000);
+    } catch (err: any) {
+      alert(`Error updating settings: ${err.message}`);
+    } finally {
+      setSavingPlatformSettings(false);
+    }
+  };
+
+  const handleLogoFileUpload = (file: File) => {
+    if (file.size > 2 * 1024 * 1024) {
+      alert('Logo file size must be less than 2MB.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const result = e.target?.result as string;
+      if (result) {
+        setPlatformLogo(result);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleAdminLogin = async (e: React.FormEvent) => {
@@ -515,6 +569,7 @@ export default function AdminPortal() {
             { id: 'revenue', icon: '💳', label: 'Revenue & Tier Matrix' },
             { id: 'admins', icon: '👑', label: `Super Admins (${admins.length})` },
             { id: 'diagnostics', icon: '🛠️', label: 'System Health' },
+            { id: 'settings', icon: '⚙️', label: 'Owner & Logo Settings' },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -931,6 +986,136 @@ export default function AdminPortal() {
                 </div>
                 <div className="p-2.5 rounded-lg bg-slate-950 font-mono text-xs text-indigo-400 border border-slate-800">
                   node scripts/create-superadmin.js [email] [password]
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 6: OWNER & LOGO SETTINGS */}
+        {activeTab === 'settings' && (
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-bold text-white">Owner & Platform Logo Settings</h2>
+              <p className="text-xs text-slate-400">
+                Configure the master platform branding and logo displayed across the main landing page and top navigation.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Settings Form */}
+              <div className="lg:col-span-2 p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-6">
+                <form onSubmit={handleSavePlatformSettings} className="space-y-5">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Platform Brand Name
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={platformBrandName}
+                      onChange={(e) => setPlatformBrandName(e.target.value)}
+                      placeholder="e.g. SMS Global Cloud"
+                      className="w-full px-3 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      This brand name is displayed next to the logo in the index page top navigation.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Platform & Website Logo
+                    </label>
+
+                    {/* Hidden file input */}
+                    <input
+                      type="file"
+                      ref={platformLogoInputRef}
+                      accept="image/png, image/jpeg, image/jpg, image/svg+xml, image/webp"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) handleLogoFileUpload(file);
+                      }}
+                    />
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => platformLogoInputRef.current?.click()}
+                        className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition flex items-center gap-2 shadow-sm"
+                      >
+                        <span>📁</span> Upload Logo from Device
+                      </button>
+
+                      {platformLogo && (
+                        <button
+                          type="button"
+                          onClick={() => setPlatformLogo('')}
+                          className="px-3 py-2.5 rounded-xl bg-red-950/60 border border-red-800/40 text-red-300 hover:bg-red-900/60 text-xs font-semibold transition"
+                        >
+                          Remove Logo
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="mt-3">
+                      <label className="block text-[11px] text-slate-400 mb-1">Or enter a public image URL:</label>
+                      <input
+                        type="text"
+                        value={platformLogo.startsWith('data:') ? '[Uploaded Image File from Device]' : platformLogo}
+                        onChange={(e) => setPlatformLogo(e.target.value)}
+                        placeholder="https://example.com/logo.png"
+                        className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-4 border-t border-slate-800 flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={savingPlatformSettings}
+                      className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition disabled:opacity-50 flex items-center gap-2 shadow-lg shadow-indigo-600/30"
+                    >
+                      {savingPlatformSettings ? 'Saving Settings...' : 'Save Platform Settings'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Live Preview Card */}
+              <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-white mb-1">Live Top Navigation Preview</h3>
+                  <p className="text-xs text-slate-400 mb-4">
+                    Exact appearance on the index landing page topnav:
+                  </p>
+
+                  <div className="p-4 rounded-xl bg-white border border-slate-200 text-slate-900 shadow-sm">
+                    <div className="flex items-center gap-3">
+                      {platformLogo ? (
+                        <img
+                          src={platformLogo}
+                          alt="Platform Logo"
+                          className="h-9 w-auto max-h-9 max-w-[130px] object-contain rounded"
+                        />
+                      ) : (
+                        <span className="text-2xl">🏫</span>
+                      )}
+                      <span className="font-bold text-lg tracking-tight text-blue-600">
+                        {platformBrandName || 'SMS Global Cloud'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-6 pt-4 border-t border-slate-800 text-[11px] text-slate-400 space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-emerald-400">
+                    <span>✓</span> Synchronized with landing page topnav
+                  </div>
+                  <div>• Supports PNG, SVG, JPG, WebP</div>
+                  <div>• Saved directly to platform owner settings in database</div>
                 </div>
               </div>
             </div>

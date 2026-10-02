@@ -5826,13 +5826,28 @@ export default function Dashboard() {
                 </svg>
               </button>
 
-              <div>
-                <h1 className={`font-black text-lg sm:text-xl tracking-tight leading-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                  Dashboard
-                </h1>
-                <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} hidden sm:block truncate max-w-md`}>
-                  Comprehensive school management and real-time operational analytics.
-                </p>
+              <div className="flex items-center gap-3">
+                {/* School Logo */}
+                {tenant?.logoUrl ? (
+                  <img 
+                    src={tenant.logoUrl} 
+                    alt={tenant.name} 
+                    className="w-10 h-10 rounded-lg object-cover border border-slate-200 dark:border-slate-700 shadow-sm"
+                  />
+                ) : (
+                  <div className="w-10 h-10 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold text-lg shadow-sm">
+                    {tenant?.name?.charAt(0) || '🏫'}
+                  </div>
+                )}
+                
+                <div>
+                  <h1 className={`font-black text-lg sm:text-xl tracking-tight leading-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {tenant?.name || 'Dashboard'}
+                  </h1>
+                  <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} hidden sm:block truncate max-w-md`}>
+                    {tenant?.alias || 'School Management Platform'}
+                  </p>
+                </div>
               </div>
             </div>
 
