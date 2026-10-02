@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 export async function PUT(
   req: NextRequest,
@@ -30,13 +32,7 @@ export async function PUT(
     }
 
     // Verify the teacher belongs to this tenant
-    const existing = await prisma.teacher.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Teacher not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('teacher', id, session.tenantId);
 
     const updatedTeacher = await prisma.teacher.update({
       where: { id },
@@ -54,8 +50,8 @@ export async function PUT(
       teacher: updatedTeacher,
     });
   } catch (error: any) {
-    console.error('Error updating teacher:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -78,19 +74,13 @@ export async function DELETE(
     const { id } = await params;
 
     // Verify the teacher belongs to this tenant
-    const existing = await prisma.teacher.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Teacher not found.' }, { status: 404 });
-    }
+    await verifyTenantOwnership('teacher', id, session.tenantId);
 
     await prisma.teacher.delete({ where: { id } });
 
     return NextResponse.json({ success: true, message: 'Teacher deleted successfully.' });
   } catch (error: any) {
-    console.error('Error deleting teacher:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
