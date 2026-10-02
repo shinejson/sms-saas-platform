@@ -640,6 +640,7 @@ export default function Dashboard() {
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const [testMode, setTestMode] = useState(false);
+  const profileDropdownRef = useRef<HTMLDivElement>(null);
 
   // Subscription state
   const [subscriptionData, setSubscriptionData] = useState<SubscriptionData | null>(null);
@@ -1497,6 +1498,33 @@ export default function Dashboard() {
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, []);
+
+  // Profile dropdown outside-click & escape key listener
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (profileDropdownRef.current && !profileDropdownRef.current.contains(e.target as Node)) {
+        setProfileDropdownOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && profileDropdownOpen) {
+        setProfileDropdownOpen(false);
+      }
+    };
+    if (profileDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleKeyDown);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [profileDropdownOpen]);
+
+  // Close profile dropdown when navigating to another tab
+  useEffect(() => {
+    setProfileDropdownOpen(false);
+  }, [activeTab]);
 
   // Refetch subscription when switching to subscription tab
   useEffect(() => {
@@ -6203,7 +6231,7 @@ export default function Dashboard() {
               </div>
 
               {/* Profile Pill & Dropdown */}
-              <div className="relative">
+              <div className="relative" ref={profileDropdownRef}>
                 <button
                   onClick={() => setProfileDropdownOpen(!profileDropdownOpen)}
                   className={`flex items-center gap-2 px-2.5 py-1 rounded-xl border shadow-sm transition ${
