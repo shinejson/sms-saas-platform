@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
 import { getClientIp, logAuditEvent } from '@/lib/audit';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 type AcademicYearStatus = 'Active' | 'Inactive';
 
@@ -52,13 +54,7 @@ export async function PUT(
     }
 
     // Verify the academic year belongs to this tenant
-    const existing = await prisma.academicYear.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Academic year not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('academicYear', id, session.tenantId);
 
     const academicYear = String(year).trim();
     const resolvedStatus = normalizeStatus(status);
@@ -124,11 +120,11 @@ export async function PUT(
       academicYear: updatedAcademicYear,
     });
   } catch (error: any) {
-    console.error('Error updating academic year:', error);
-    if (error.code === 'P2002') {
+    if ((error as any).code === 'P2002') {
       return NextResponse.json({ error: 'This academic year already exists.' }, { status: 409 });
     }
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -151,13 +147,7 @@ export async function DELETE(
     const { id } = await params;
 
     // Verify the academic year belongs to this tenant
-    const existing = await prisma.academicYear.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Academic year not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('academicYear', id, session.tenantId);
 
     // Invoices cascade on delete, so refuse while the session is still in use.
     const [classCount, invoiceCount, attendanceCount] = await Promise.all([
@@ -200,8 +190,8 @@ export async function DELETE(
       message: 'Academic year deleted successfully!',
     });
   } catch (error: any) {
-    console.error('Error deleting academic year:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
