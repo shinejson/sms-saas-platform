@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 export async function PUT(
   req: NextRequest,
@@ -30,13 +32,7 @@ export async function PUT(
     }
 
     // Verify parent mapping exists and belongs to current tenant
-    const existing = await prisma.parent.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Parent mapping not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('parent', id, session.tenantId);
 
     // Resolve student
     const student = await prisma.student.findFirst({
@@ -86,8 +82,8 @@ export async function PUT(
       parent: updatedParent,
     });
   } catch (error: any) {
-    console.error('Error updating parent mapping:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -110,13 +106,7 @@ export async function DELETE(
     const { id } = await params;
 
     // Verify mapping exists and belongs to current tenant
-    const existing = await prisma.parent.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Parent mapping not found.' }, { status: 404 });
-    }
+    await verifyTenantOwnership('parent', id, session.tenantId);
 
     await prisma.parent.delete({ where: { id } });
 
@@ -125,7 +115,7 @@ export async function DELETE(
       message: 'Parent mapping deleted successfully.',
     });
   } catch (error: any) {
-    console.error('Error deleting parent mapping:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
