@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 // Helper: Standard WAEC / GES 9-point grading scale matching Code.gs
 function calculateGradeAndRemarks(totalScore: number): { grade: string; remarks: string } {
@@ -35,13 +37,7 @@ export async function PUT(
     const body = await req.json();
     const { course, term, academicYear, studentClass, classScore, examScore100 } = body;
 
-    const existing = await prisma.performance.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Performance record not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('performance', id, session.tenantId);
 
     const targetCourse = course !== undefined ? course.trim() : existing.course;
     const targetTerm = term !== undefined ? term.trim() : existing.term;
@@ -109,8 +105,8 @@ export async function PUT(
       performance: updated,
     });
   } catch (error: any) {
-    console.error('Error updating performance record:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -132,13 +128,7 @@ export async function DELETE(
 
     const { id } = await params;
 
-    const existing = await prisma.performance.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Performance record not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('performance', id, session.tenantId);
 
     await prisma.performance.delete({ where: { id } });
 
@@ -147,7 +137,7 @@ export async function DELETE(
       message: `Performance record ${existing.performanceId || ''} deleted successfully.`,
     });
   } catch (error: any) {
-    console.error('Error deleting performance record:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
