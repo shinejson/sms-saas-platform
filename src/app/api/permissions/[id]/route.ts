@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken } from '@/lib/auth';
 import { isAdminRole, validatePermActionsInput } from '@/lib/permissions';
+import { verifyTenantOwnership } from '@/lib/tenant-security';
+import { sanitizeError } from '@/lib/errors';
 
 export async function PUT(
   req: NextRequest,
@@ -44,13 +46,7 @@ export async function PUT(
     }
 
     // Verify permission belongs to current tenant
-    const existing = await prisma.permission.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Permission not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('permission', id, session.tenantId);
 
     const cleanRole = role.trim();
 
@@ -87,8 +83,8 @@ export async function PUT(
       permission: updated,
     });
   } catch (error: any) {
-    console.error('Error updating permission:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
 
@@ -119,13 +115,7 @@ export async function DELETE(
     const { id } = await params;
 
     // Verify permission belongs to current tenant
-    const existing = await prisma.permission.findFirst({
-      where: { id, tenantId: session.tenantId },
-    });
-
-    if (!existing) {
-      return NextResponse.json({ error: 'Permission not found.' }, { status: 404 });
-    }
+    const existing = await verifyTenantOwnership('permission', id, session.tenantId);
 
     // Core admin protection
     const protectedRoles = ['admin', 'school admin', 'super admin'];
@@ -143,7 +133,7 @@ export async function DELETE(
       message: 'Permission deleted successfully.',
     });
   } catch (error: any) {
-    console.error('Error deleting permission:', error);
-    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
+    const sanitized = sanitizeError(error, process.env.NODE_ENV === 'development');
+    return NextResponse.json({ error: sanitized.error }, { status: sanitized.statusCode });
   }
 }
