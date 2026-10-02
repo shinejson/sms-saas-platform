@@ -17,6 +17,8 @@
  * groups in the Permissions modal always mirror the real sidebar 1:1.
  */
 
+import { DEPARTMENT_RESOURCES } from './departments';
+
 export type PermAction = 'view' | 'create' | 'edit' | 'delete';
 
 export const PERM_ACTIONS: PermAction[] = ['view', 'create', 'edit', 'delete'];
@@ -28,7 +30,14 @@ export const PERM_ACTION_LABELS: Record<PermAction, string> = {
   delete: 'Can delete',
 };
 
-export type PermSectionKey = 'general' | 'people' | 'academics' | 'finance' | 'system';
+export type PermSectionKey =
+  | 'general'
+  | 'people'
+  | 'academics'
+  | 'finance'
+  | 'operations'
+  | 'marketing'
+  | 'system';
 
 export interface PermSectionDef {
   key: PermSectionKey;
@@ -43,6 +52,8 @@ export const PERM_SECTIONS: PermSectionDef[] = [
   { key: 'people', label: 'People', icon: '👥', description: 'Student, staff & guardian records' },
   { key: 'academics', label: 'Academics', icon: '🏫', description: 'Classes, subjects, attendance & assessments' },
   { key: 'finance', label: 'Finance', icon: '💰', description: 'Fees, invoices & payments' },
+  { key: 'operations', label: 'Operations', icon: '🏗️', description: 'Assets, procurement, maintenance, transport & vendors' },
+  { key: 'marketing', label: 'Marketing', icon: '📣', description: 'Campaigns, admission leads, announcements & events' },
   { key: 'system', label: 'System', icon: '⚙️', description: 'Configuration, reports & administration' },
 ];
 
@@ -62,6 +73,20 @@ export interface PermPageDef {
   /** Optional note shown in the permission builder. */
   hint?: string;
 }
+
+/**
+ * Operations & Marketing pages are generated from the department registry
+ * (`src/lib/departments.ts`) so the sidebar, the permission matrix and the API
+ * guards can never drift apart — add a resource there and it shows up here.
+ */
+const DEPARTMENT_PERM_PAGES: PermPageDef[] = DEPARTMENT_RESOURCES.map((resource) => ({
+  key: resource.permKey,
+  label: resource.navLabel,
+  icon: resource.icon,
+  section: resource.department as PermSectionKey,
+  tab: resource.tab,
+  actions: ['view', 'create', 'edit', 'delete'],
+}));
 
 /** Every page that appears in the dashboard sidebar, in sidebar order. */
 export const PERM_PAGES: PermPageDef[] = [
@@ -96,6 +121,9 @@ export const PERM_PAGES: PermPageDef[] = [
   { key: 'payments', label: 'Payments', icon: '💰', section: 'finance', tab: 'payments', actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'billing_items', label: 'Billings', icon: '🏷️', section: 'finance', tab: 'billing', subTab: 'items', actions: ['view', 'create', 'edit', 'delete'] },
   { key: 'billing_categories', label: 'Billing Categories', icon: '📁', section: 'finance', tab: 'billing', subTab: 'categories', actions: ['view', 'create', 'edit', 'delete'] },
+
+  // Operations & Marketing (generated from the department registry)
+  ...DEPARTMENT_PERM_PAGES,
 
   // System
   { key: 'subscription', label: 'Subscription', icon: '💳', section: 'system', tab: 'subscription', actions: ['view'] },
