@@ -8,9 +8,21 @@
  * (assets | requisitions | work-orders | transport | vendors); anything else
  * returns 404.
  */
+import { NextRequest } from 'next/server';
 import { departmentCollectionRoute } from '@/lib/department-api';
 
 const handlers = departmentCollectionRoute('operations');
 
-export const GET = handlers.GET;
-export const POST = handlers.POST;
+export async function GET(
+  req: NextRequest,
+  ctx: { params: Promise<{ resource: string }> }
+) {
+  return handlers.GET(req, ctx);
+}
+
+export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ resource: string }> }
+) {
+  return handlers.POST(req, ctx);
+}

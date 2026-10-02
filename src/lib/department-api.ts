@@ -39,8 +39,23 @@ type PrismaDelegate = {
 };
 
 function delegate(resource: DepartmentResourceDef): PrismaDelegate {
-  const model = (prisma as unknown as Record<string, PrismaDelegate>)[resource.model];
+  let model = (prisma as unknown as Record<string, PrismaDelegate>)[resource.model];
   if (!model || typeof model.findMany !== 'function') {
+    try {
+      // In dev mode, PrismaClient in globalThis may be stale if schema was regenerated after server boot
+      const { PrismaClient } = require('@prisma/client');
+      const freshClient = new PrismaClient({
+        datasourceUrl: process.env.DATABASE_URL,
+        errorFormat: 'minimal',
+      });
+      const freshModel = (freshClient as unknown as Record<string, PrismaDelegate>)[resource.model];
+      if (freshModel && typeof freshModel.findMany === 'function') {
+        (globalThis as unknown as { prisma: unknown }).prisma = freshClient;
+        return freshModel;
+      }
+    } catch {
+      // Fall through to error
+    }
     throw new Error(`Unknown Prisma model for resource "${resource.key}": ${resource.model}`);
   }
   return model;

@@ -27,6 +27,8 @@ import {
   getResourceByTab,
 } from '@/lib/departments';
 import DepartmentWorkspace from './departments/DepartmentWorkspace';
+import ThemeToggle from '@/components/ThemeToggle';
+import { useTheme } from '@/components/ThemeProvider';
 
 interface TenantInfo {
   id: string;
@@ -696,6 +698,7 @@ const SidebarGroup = ({
 );
 
 export default function Dashboard() {
+  const { isDark: darkMode } = useTheme();
   const [token, setToken] = useState<string | null>(null);
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
   const [user, setUser] = useState<UserInfo | null>(null);
@@ -769,7 +772,6 @@ export default function Dashboard() {
   const [selectedYear, setSelectedYear] = useState<string>('');
   const [selectedTerm, setSelectedTerm] = useState<string>('All Terms');
   const [selectedDate, setSelectedDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
-  const [darkMode, setDarkMode] = useState(false);
 
   // KPIs & Chart states
   const [kpis, setKpis] = useState<DashboardKPIs | null>(null);
@@ -1356,8 +1358,10 @@ export default function Dashboard() {
   const navGroupForTab = (tab: string): string | null =>
     PERM_PAGES.find((page) => page.tab === tab)?.section ?? null;
 
+  // Only one sidebar dropdown can be open at a time (accordion behavior).
+  // Clicking an open group closes it; clicking a closed group closes all others and opens it.
   const toggleNavGroup = (groupKey: string) =>
-    setOpenNavGroups((prev) => ({ ...prev, [groupKey]: !prev[groupKey] }));
+    setOpenNavGroups((prev) => (prev[groupKey] ? {} : { [groupKey]: true }));
 
   /** The Operations / Marketing page currently open, if any. */
   const activeDepartmentResource = getResourceByTab(activeTab);
@@ -1384,13 +1388,13 @@ export default function Dashboard() {
     fetchPermPolicy();
   }, [fetchPermPolicy]);
 
-  // Reveal the sidebar group that owns the page we just navigated to.
+  // Reveal only the sidebar group that owns the page we just navigated to.
   useEffect(() => {
     const group = navGroupForTab(activeTab);
     // 'general' (Dashboard) is a standalone button, not a dropdown — so on a
     // fresh load every collapsible group stays closed.
     if (!group || group === 'general') return;
-    setOpenNavGroups((prev) => (prev[group] ? prev : { ...prev, [group]: true }));
+    setOpenNavGroups({ [group]: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
@@ -6393,17 +6397,7 @@ export default function Dashboard() {
               </div>
 
               {/* Dark Mode Toggle */}
-              <button
-                onClick={() => setDarkMode(!darkMode)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition active:scale-95 ${
-                  darkMode
-                    ? 'bg-slate-800 border-slate-700 text-amber-300 hover:bg-slate-700'
-                    : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                }`}
-                title="Toggle Theme"
-              >
-                <span>{darkMode ? '☀️ Light' : '🌙 Dark'}</span>
-              </button>
+              <ThemeToggle />
 
               {/* Plan Badge */}
               <div

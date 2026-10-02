@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import ThemeToggle from '@/components/ThemeToggle';
 
 interface TenantItem {
   id: string;
@@ -481,6 +482,7 @@ export default function AdminPortal() {
             </a>
 
             <div className="flex items-center gap-3 pl-4 border-l border-slate-800">
+              <ThemeToggle />
               <div className="text-right hidden sm:block">
                 <div className="text-xs font-bold text-white">{currentUser?.fullName}</div>
                 <div className="text-[10px] text-indigo-400">{currentUser?.email}</div>

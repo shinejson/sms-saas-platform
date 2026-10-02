@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect } from "react";
 import HeroBackgroundSlider from "@/components/HeroBackgroundSlider";
+import ThemeToggle from "@/components/ThemeToggle";
 
 export default function Home() {
   const [showRegister, setShowRegister] = useState(false);
@@ -151,6 +152,7 @@ export default function Home() {
           </nav>
 
           <div className="flex items-center gap-3">
+            <ThemeToggle />
             {hasActiveSession && (
               <a
                 href="/dashboard"
