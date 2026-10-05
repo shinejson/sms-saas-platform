@@ -673,18 +673,20 @@ const SidebarGroup = ({
       onClick={onToggle}
       aria-expanded={open}
       aria-controls={`nav-group-${groupKey}`}
-      className="group w-full flex items-center justify-between gap-2 px-1 pb-1.5 mb-2 border-b border-slate-100 transition"
+      className="group w-full flex items-center justify-between gap-2 px-1 pb-1.5 mb-2 border-b border-slate-100 dark:border-slate-800 transition"
     >
       <span
         className={`flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-colors ${
-          open || hasActive ? 'text-slate-600' : 'text-slate-400'
-        } group-hover:text-slate-700`}
+          open || hasActive
+            ? 'text-slate-600 dark:text-slate-200'
+            : 'text-slate-400 dark:text-slate-500'
+        } group-hover:text-slate-700 dark:group-hover:text-slate-100`}
       >
         {label}
         {!open && hasActive && <span className="w-1.5 h-1.5 rounded-full bg-blue-600" />}
       </span>
       <ChevronDownIcon
-        className={`w-3.5 h-3.5 shrink-0 text-slate-400 group-hover:text-slate-600 transition-transform duration-200 ${
+        className={`w-3.5 h-3.5 shrink-0 text-slate-400 dark:text-slate-500 group-hover:text-slate-600 dark:group-hover:text-slate-300 transition-transform duration-200 ${
           open ? 'rotate-180' : ''
         }`}
       />
@@ -5567,12 +5569,12 @@ export default function Dashboard() {
 
       {/* FIXED SCROLLABLE SIDEBAR (MATCHING SCREENSHOT) */}
       <aside
-        className={`fixed top-0 bottom-0 left-0 w-64 bg-white border-r border-slate-200 flex flex-col z-50 transition-transform duration-300 md:translate-x-0 ${
+        className={`fixed top-0 bottom-0 left-0 w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex flex-col z-50 transition-transform duration-300 md:translate-x-0 ${
           mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
         {/* Top Header: Logo + School Alias / Name */}
-        <div className="h-16 px-4 flex items-center justify-between border-b border-slate-100 shrink-0">
+        <div className="h-16 px-4 flex items-center justify-between border-b border-slate-100 dark:border-slate-800 shrink-0">
           <div className="flex items-center gap-3 overflow-hidden">
             {/* Hidden file input for uploading logo from local device */}
             <input
@@ -5595,7 +5597,7 @@ export default function Dashboard() {
               {tenant?.logoUrl ? (
                 <img src={tenant.logoUrl} alt={tenant.alias || tenant.name} className="w-full h-full object-cover" />
               ) : (
-                <div className="w-7 h-7 rounded-full bg-blue-700 border-2 border-white/90 flex items-center justify-center">
+                <div className="w-7 h-7 rounded-full bg-blue-700 border-2 border-white/90 dark:border-slate-300/90 flex items-center justify-center">
                   <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M11 2h2v7h7v2h-7v11h-2V11H4V9h7V2z" />
                   </svg>
@@ -5612,13 +5614,13 @@ export default function Dashboard() {
             </div>
             <div className="overflow-hidden">
               <h2
-                className="font-black text-base text-slate-900 tracking-tight truncate uppercase"
+                className="font-black text-base text-slate-900 dark:text-white tracking-tight truncate uppercase"
                 title={tenant?.name || tenant?.alias || ''}
               >
                 {tenant?.alias || tenant?.name || 'GEBSCO'}
               </h2>
               {tenant?.alias && tenant?.name && tenant?.alias !== tenant?.name && (
-                <p className="text-[10px] text-slate-400 font-medium truncate leading-tight" title={tenant.name}>
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 font-medium truncate leading-tight" title={tenant.name}>
                   {tenant.name}
                 </p>
               )}
@@ -5626,7 +5628,7 @@ export default function Dashboard() {
           </div>
           <button
             onClick={() => setMobileMenuOpen(false)}
-            className="md:hidden text-slate-400 hover:text-slate-600 p-1.5 rounded-lg"
+            className="md:hidden text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1.5 rounded-lg"
           >
             ✕
           </button>
@@ -5644,7 +5646,7 @@ export default function Dashboard() {
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition ${
                   activeTab === 'overview'
                     ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
                 <DashboardIcon className="w-5 h-5 shrink-0" />
@@ -5687,10 +5689,10 @@ export default function Dashboard() {
                         className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                           active
                             ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                            : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                         }`}
                       >
-                        <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`} />
+                        <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                         <span>{label}</span>
                       </button>
                     );
@@ -5735,10 +5737,10 @@ export default function Dashboard() {
                         className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                           active
                             ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                            : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                         }`}
                       >
-                        <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`} />
+                        <Icon className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                         <span>{label}</span>
                       </button>
                     );
@@ -5761,10 +5763,10 @@ export default function Dashboard() {
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                         activeTab === 'invoices'
                           ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                       }`}
                     >
-                      <InvoicesIcon className={`w-5 h-5 shrink-0 ${activeTab === 'invoices' ? 'text-white' : 'text-slate-500'}`} />
+                      <InvoicesIcon className={`w-5 h-5 shrink-0 ${activeTab === 'invoices' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                       <span>Invoices</span>
                     </button>
                 )}
@@ -5775,10 +5777,10 @@ export default function Dashboard() {
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                         activeTab === 'payments'
                           ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                       }`}
                     >
-                      <PaymentsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'payments' ? 'text-white' : 'text-slate-500'}`} />
+                      <PaymentsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'payments' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                       <span>Payments</span>
                     </button>
                 )}
@@ -5793,10 +5795,10 @@ export default function Dashboard() {
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                         activeTab === 'billing' && billingSubTab === 'items'
                           ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                       }`}
                     >
-                      <BillingsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'billing' && billingSubTab === 'items' ? 'text-white' : 'text-slate-500'}`} />
+                      <BillingsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'billing' && billingSubTab === 'items' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                       <span>Billings</span>
                     </button>
                 )}
@@ -5811,10 +5813,10 @@ export default function Dashboard() {
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                         activeTab === 'billing' && billingSubTab === 'categories'
                           ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                       }`}
                     >
-                      <BillingCategoriesIcon className={`w-5 h-5 shrink-0 ${activeTab === 'billing' && billingSubTab === 'categories' ? 'text-white' : 'text-slate-500'}`} />
+                      <BillingCategoriesIcon className={`w-5 h-5 shrink-0 ${activeTab === 'billing' && billingSubTab === 'categories' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                       <span>Billing Categories</span>
                     </button>
                 )}
@@ -5849,12 +5851,12 @@ export default function Dashboard() {
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                         active
                           ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                          : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                       }`}
                     >
                       <DepartmentNavIcon
                         resourceKey={resource.key}
-                        className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500'}`}
+                        className={`w-5 h-5 shrink-0 ${active ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`}
                       />
                       <span className="truncate">{resource.navLabel}</span>
                     </button>
@@ -5879,20 +5881,20 @@ export default function Dashboard() {
                   className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition ${
                     activeTab === 'subscription'
                       ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                   }`}
                 >
                   <div className="flex items-center gap-3">
-                    <SubscriptionIcon className={`w-5 h-5 shrink-0 ${activeTab === 'subscription' ? 'text-white' : 'text-slate-500'}`} />
+                    <SubscriptionIcon className={`w-5 h-5 shrink-0 ${activeTab === 'subscription' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                     <span>Subscription</span>
                   </div>
                   {tenant?.subscription?.status === 'expiring_soon' && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 dark:bg-amber-500/15 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-500/40 animate-pulse">
                       {tenant.subscription.daysRemaining}d
                     </span>
                   )}
                   {tenant?.subscription?.status === 'expired' && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300">
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 dark:bg-rose-500/15 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-500/40">
                       Due
                     </span>
                   )}
@@ -5905,10 +5907,10 @@ export default function Dashboard() {
                   className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                     activeTab === 'settings'
                       ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                   }`}
                 >
-                  <SettingsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'settings' ? 'text-white' : 'text-slate-500'}`} />
+                  <SettingsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'settings' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                   <span>Settings</span>
                 </button>
               )}
@@ -5919,10 +5921,10 @@ export default function Dashboard() {
                   className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                     activeTab === 'reports'
                       ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                   }`}
                 >
-                  <ReportsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'reports' ? 'text-white' : 'text-slate-500'}`} />
+                  <ReportsIcon className={`w-5 h-5 shrink-0 ${activeTab === 'reports' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                   <span>Reports</span>
                 </button>
               )}
@@ -5933,10 +5935,10 @@ export default function Dashboard() {
                   className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition ${
                     activeTab === 'migration'
                       ? 'bg-blue-600 text-white font-semibold shadow-sm'
-                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white font-medium'
                   }`}
                 >
-                  <MigrationIcon className={`w-5 h-5 shrink-0 ${activeTab === 'migration' ? 'text-white' : 'text-slate-500'}`} />
+                  <MigrationIcon className={`w-5 h-5 shrink-0 ${activeTab === 'migration' ? 'text-white' : 'text-slate-500 dark:text-slate-400'}`} />
                   <span>Sheets Migration</span>
                 </button>
               )}
@@ -5945,16 +5947,16 @@ export default function Dashboard() {
         </div>
 
         {/* Pinned Bottom of Sidebar */}
-        <div className="p-3 border-t border-slate-100 bg-white shrink-0 space-y-2">
+        <div className="p-3 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 shrink-0 space-y-2">
           {/* Compact Quota Progress */}
-          <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-100">
-            <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600 mb-1">
+          <div className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-700">
+            <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
               <span>Student Quota</span>
-              <span className="font-bold text-slate-800">
+              <span className="font-bold text-slate-800 dark:text-slate-100">
                 {stats?.studentCount || 0}/{tenant?.studentLimit || 15}
               </span>
             </div>
-            <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden mb-1">
+            <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-1.5 overflow-hidden mb-1">
               <div
                 className={`h-full rounded-full transition-all duration-500 ${
                   (stats?.quotaPercentage || 0) >= 90
@@ -5967,7 +5969,7 @@ export default function Dashboard() {
               />
             </div>
             <div className="flex items-center justify-between text-[10px]">
-              <span className="text-slate-400 font-medium">{tenant?.plan || 'DEMO'} Plan</span>
+              <span className="text-slate-400 dark:text-slate-500 font-medium">{tenant?.plan || 'DEMO'} Plan</span>
               {can('subscription') && (
                   <button
                     onClick={() => setActiveTab('subscription')}
