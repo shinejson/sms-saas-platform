@@ -29,6 +29,10 @@ import {
 import DepartmentWorkspace from './departments/DepartmentWorkspace';
 import ThemeToggle from '@/components/ThemeToggle';
 import { useTheme } from '@/components/ThemeProvider';
+import useSessionGuard from '@/hooks/useSessionGuard';
+import SessionTimeoutDialog from '@/components/SessionTimeoutDialog';
+import SessionCheckingScreen from '@/components/SessionCheckingScreen';
+import { readTenant } from '@/lib/session';
 
 interface TenantInfo {
   id: string;
@@ -699,9 +703,24 @@ const SidebarGroup = ({
 
 export default function Dashboard() {
   const { isDark: darkMode } = useTheme();
-  const [token, setToken] = useState<string | null>(null);
-  const [tenant, setTenant] = useState<TenantInfo | null>(null);
-  const [user, setUser] = useState<UserInfo | null>(null);
+
+  // ---- SESSION / AUTHENTICATION --------------------------------------------
+  // The dashboard only renders once the stored token has been verified by the
+  // server (signature, expiry, account status). The guard also tracks the
+  // user's last activity and signs them out after the inactivity window, so a
+  // token left behind in localStorage can no longer re-open this page.
+  const session = useSessionGuard({ redirectTo: '/' });
+
+  // `session.token` is the live token: it is slid forward while the user is
+  // active, so every request below stays authorised.
+  const token = session.token;
+  const user = (session.user as UserInfo | null) ?? null;
+
+  // Seeded from the last known school, then kept fresh by the dashboard's own
+  // data loads (stats / profile updates).
+  const [tenant, setTenant] = useState<TenantInfo | null>(
+    () => (readTenant() as TenantInfo | null) ?? null
+  );
   const [activeTab, setActiveTab] = useState<string>('overview');
   // Sidebar dropdown groups (PEOPLE / ACADEMICS / FINANCE / OPERATIONS /
   // MARKETING / SYSTEM). Every group is CLOSED by default — a group only opens
@@ -1304,33 +1323,7 @@ export default function Dashboard() {
   // Backup Export state
   const [backupLoading, setBackupLoading] = useState(false);
 
-  // On mount: authenticate from localStorage
-  useEffect(() => {
-    const savedToken = localStorage.getItem('sms_token');
-    const savedTenant = localStorage.getItem('sms_tenant');
-    const savedUser = localStorage.getItem('sms_user');
 
-    if (!savedToken) {
-      window.location.href = '/';
-      return;
-    }
-
-    setToken(savedToken);
-    if (savedTenant) {
-      try {
-        setTenant(JSON.parse(savedTenant));
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    if (savedUser) {
-      try {
-        setUser(JSON.parse(savedUser));
-      } catch (e) {
-        console.error(e);
-      }
-    }
-  }, []);
 
   // ---- ROLE-BASED ACCESS CONTROL --------------------------------------------
   // The sidebar & in-page action buttons are driven by the permission policy
@@ -5332,10 +5325,9 @@ export default function Dashboard() {
   };
 
   const handleSignOut = () => {
-    localStorage.removeItem('sms_token');
-    localStorage.removeItem('sms_tenant');
-    localStorage.removeItem('sms_user');
-    window.location.href = '/';
+    // Clears the stored session, records the sign-out server-side (audit log)
+    // and returns to the login screen.
+    session.signOut('manual');
   };
 
   const handleTopnavSearchChange = (val: string) => {
@@ -5554,8 +5546,30 @@ export default function Dashboard() {
         .toUpperCase()
     : 'AS';
 
+  // Nothing renders until the session has been verified. An expired, idle or
+  // tampered token is redirected to the login screen by the guard instead of
+  // flashing the dashboard shell.
+  if (session.status !== 'authenticated') {
+    return (
+      <SessionCheckingScreen
+        message={
+          session.status === 'checking' ? 'Verifying your session…' : 'Redirecting to sign in…'
+        }
+      />
+    );
+  }
+
   return (
     <div className={`min-h-screen ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-900'} flex font-sans transition-colors duration-200`}>
+
+      {/* Inactivity countdown - appears shortly before the auto sign-out */}
+      <SessionTimeoutDialog
+        open={session.warningVisible}
+        secondsRemaining={session.secondsRemaining}
+        idleMinutes={session.idleMinutes}
+        onStaySignedIn={session.extendSession}
+        onSignOut={() => session.signOut('manual')}
+      />
 
       {/* Mobile Drawer Backdrop */}
       {mobileMenuOpen && (

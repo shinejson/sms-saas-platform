@@ -91,7 +91,19 @@ export function proxy(req: NextRequest) {
         'http://localhost:3001',
       ].filter(Boolean);
       
-      if (origin && !allowedOrigins.includes(origin)) {
+      // Same-origin requests are always legitimate. Comparing the Origin host
+      // with the host the request was made to keeps multi-tenant subdomains,
+      // custom domains and preview URLs working without an env var per host.
+      let sameOrigin = false;
+      if (origin) {
+        try {
+          sameOrigin = new URL(origin).host === req.headers.get('host');
+        } catch {
+          sameOrigin = false;
+        }
+      }
+      
+      if (origin && !sameOrigin && !allowedOrigins.includes(origin)) {
         console.warn(`[Security] Origin validation failed: ${origin} for ${pathname}`);
         return NextResponse.json(
           { error: 'Invalid origin' },
@@ -104,8 +116,19 @@ export function proxy(req: NextRequest) {
   // === RATE LIMITING ===
   let rateLimitConfig: { max: number; window: number } | null = null;
   
-  // Auth endpoints: 10 requests per 15 min
-  if (pathname.startsWith('/api/auth/')) {
+  // Session maintenance (validate / slide / end a session). These are called
+  // on every protected page load and while a user is active, so they must not
+  // share the strict credential-guessing budget below. They carry no password
+  // and are rejected without a valid token.
+  if (
+    pathname.startsWith('/api/auth/session') ||
+    pathname.startsWith('/api/auth/refresh') ||
+    pathname.startsWith('/api/auth/logout')
+  ) {
+    rateLimitConfig = { max: 600, window: 15 * 60 * 1000 };
+  }
+  // Credential endpoints (login / registration): 10 requests per 15 min
+  else if (pathname.startsWith('/api/auth/')) {
     rateLimitConfig = { max: 10, window: 15 * 60 * 1000 };
   }
   // Webhook endpoints: 20 requests per hour

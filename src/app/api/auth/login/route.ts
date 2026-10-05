@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyPassword, generateToken } from '@/lib/auth';
+import { getClientIp, logAuditEvent } from '@/lib/audit';
+import {
+  SESSION_ABSOLUTE_HOURS,
+  SESSION_IDLE_MINUTES,
+  SESSION_TOKEN_TTL_SECONDS,
+} from '@/lib/session';
 
 // In-memory rate limiting for login attempts
 interface RateLimitEntry {
@@ -141,6 +147,8 @@ export async function POST(req: NextRequest) {
     // Successful login - clear rate limit
     clearRateLimit(rateLimitKey);
 
+    // The token lifetime equals the inactivity window and is slid forward by
+    // /api/auth/refresh while the user is active (see src/lib/session.ts).
     const token = generateToken({
       userId: user.id,
       tenantId: user.tenantId,
@@ -148,6 +156,17 @@ export async function POST(req: NextRequest) {
       fullName: user.fullName,
       role: user.role,
       subdomain: user.tenant.subdomain,
+    });
+
+    // Audit trail: logins and logouts are both recorded so a session can be
+    // followed end to end.
+    await logAuditEvent({
+      tenantId: user.tenantId,
+      userId: user.id,
+      action: 'Login',
+      entity: 'Session',
+      details: { email: user.email, role: user.role },
+      ipAddress: getClientIp(req),
     });
 
     return NextResponse.json({
@@ -160,6 +179,12 @@ export async function POST(req: NextRequest) {
       },
       tenant: user.tenant,
       token,
+      // Session policy, so the client can show accurate timeout messaging.
+      expiresAt: Date.now() + SESSION_TOKEN_TTL_SECONDS * 1000,
+      sessionPolicy: {
+        idleMinutes: SESSION_IDLE_MINUTES,
+        absoluteHours: SESSION_ABSOLUTE_HOURS,
+      },
     });
   } catch (error: any) {
     console.error('Login error:', error);

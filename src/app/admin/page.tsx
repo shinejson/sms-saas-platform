@@ -1,7 +1,10 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import ThemeToggle from '@/components/ThemeToggle';
+import useSessionGuard from '@/hooks/useSessionGuard';
+import SessionTimeoutDialog from '@/components/SessionTimeoutDialog';
+import { logoutMessage, storeSession, type LogoutReason } from '@/lib/session';
 
 interface TenantItem {
   id: string;
@@ -66,16 +69,22 @@ const PLAN_TIERS = [
 ];
 
 export default function AdminPortal() {
-  const [token, setToken] = useState<string | null>(null);
-  const [currentUser, setCurrentUser] = useState<{ email: string; fullName: string; role: string } | null>(null);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  /**
+   * Session just created by the login form. It is used until the session
+   * guard has verified it with the server, so the portal does not flash the
+   * login card again between "signed in" and "session verified".
+   */
+  const [pendingSession, setPendingSession] = useState<
+    { token: string; user: { email: string; fullName: string; role: string } } | null
+  >(null);
 
   // Login form state
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState('');
+  /** Explains an automatic sign-out (inactivity / expiry) on the login card. */
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
 
   // Dashboard Data State
   const [activeTab, setActiveTab] = useState<'overview' | 'tenants' | 'revenue' | 'admins' | 'diagnostics' | 'settings'>('overview');
@@ -112,25 +121,32 @@ export default function AdminPortal() {
   const [creatingAdmin, setCreatingAdmin] = useState(false);
   const [adminModalError, setAdminModalError] = useState('');
 
-  // Check initial session
-  useEffect(() => {
-    const savedToken = localStorage.getItem('sms_token');
-    const savedUserStr = localStorage.getItem('sms_user');
-
-    if (savedToken && savedUserStr) {
-      try {
-        const parsedUser = JSON.parse(savedUserStr);
-        if (parsedUser.role === 'SUPER_ADMIN') {
-          setToken(savedToken);
-          setCurrentUser(parsedUser);
-          setIsAuthenticated(true);
-        }
-      } catch (e) {
-        console.error('Session error:', e);
-      }
-    }
-    setCheckingAuth(false);
+  // ---- SESSION / AUTHENTICATION --------------------------------------------
+  // The portal stays on this page when signed out (it renders its own login
+  // card), so the guard is configured with `redirectTo: null`. It still
+  // verifies the stored token against the server on mount, enforces the
+  // inactivity timeout and rejects non SUPER_ADMIN tokens.
+  const handleSessionEnd = useCallback((reason: LogoutReason) => {
+    setPendingSession(null);
+    setSessionNotice(logoutMessage(reason));
   }, []);
+
+  const session = useSessionGuard({
+    redirectTo: null,
+    requiredRoles: ['SUPER_ADMIN'],
+    onSessionEnd: handleSessionEnd,
+  });
+
+  // Everything below is derived from the guard: the token it exposes is the
+  // live one (it is rotated while the Super Admin stays active).
+  const token = session.token ?? pendingSession?.token ?? null;
+  const currentUser =
+    (session.user as { email: string; fullName: string; role: string } | null) ??
+    pendingSession?.user ??
+    null;
+  const isAuthenticated =
+    session.status === 'authenticated' || (!!pendingSession && session.status === 'checking');
+  const checkingAuth = session.status === 'checking' && !pendingSession;
 
   // Fetch data when authenticated
   useEffect(() => {
@@ -235,13 +251,13 @@ export default function AdminPortal() {
         throw new Error('Access Denied: This account does not have SUPER_ADMIN / Platform Owner privileges.');
       }
 
-      localStorage.setItem('sms_token', data.token);
-      localStorage.setItem('sms_user', JSON.stringify(data.user));
-      localStorage.setItem('sms_tenant', JSON.stringify(data.tenant));
+      // Persists the token + stamps the first "last activity" of the session.
+      storeSession({ token: data.token, user: data.user, tenant: data.tenant });
 
-      setToken(data.token);
-      setCurrentUser(data.user);
-      setIsAuthenticated(true);
+      setPendingSession({ token: data.token, user: data.user });
+      setSessionNotice(null);
+      // Re-arm the guard (server verification + inactivity tracking).
+      session.reload();
     } catch (err: any) {
       setLoginError(err.message);
     } finally {
@@ -250,12 +266,7 @@ export default function AdminPortal() {
   };
 
   const handleSignOut = () => {
-    localStorage.removeItem('sms_token');
-    localStorage.removeItem('sms_user');
-    localStorage.removeItem('sms_tenant');
-    setToken(null);
-    setCurrentUser(null);
-    setIsAuthenticated(false);
+    session.signOut('manual');
   };
 
   const handleOpenEdit = (t: TenantItem) => {
@@ -312,11 +323,11 @@ export default function AdminPortal() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to impersonate school');
 
-      // Store impersonation session and launch dashboard in new tab
+      // Store impersonation session and launch dashboard in new tab.
+      // storeSession also stamps "last activity", so the impersonated session
+      // starts with a full inactivity window instead of inheriting an old one.
       sessionStorage.setItem('sms_impersonate_backup_token', token);
-      localStorage.setItem('sms_token', data.token);
-      localStorage.setItem('sms_tenant', JSON.stringify(data.tenant));
-      localStorage.setItem('sms_user', JSON.stringify(data.user));
+      storeSession({ token: data.token, user: data.user, tenant: data.tenant });
 
       window.open('/dashboard', '_blank');
     } catch (err: any) {
@@ -396,6 +407,12 @@ export default function AdminPortal() {
             <p className="text-sm text-indigo-300 font-medium mt-1">Platform Owner & Super Admin Portal</p>
           </div>
 
+          {sessionNotice && !loginError && (
+            <div className="p-3.5 mb-6 rounded-xl bg-amber-950/70 border border-amber-700/60 text-amber-200 text-xs font-semibold leading-relaxed">
+              {sessionNotice}
+            </div>
+          )}
+
           {loginError && (
             <div className="p-3.5 mb-6 rounded-xl bg-red-950/80 border border-red-700/60 text-red-200 text-xs font-semibold leading-relaxed">
               {loginError}
@@ -456,6 +473,15 @@ export default function AdminPortal() {
   // --- AUTHENTICATED PLATFORM OWNER DASHBOARD ---
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+      {/* Inactivity countdown - appears shortly before the auto sign-out */}
+      <SessionTimeoutDialog
+        open={session.warningVisible}
+        secondsRemaining={session.secondsRemaining}
+        idleMinutes={session.idleMinutes}
+        onStaySignedIn={session.extendSession}
+        onSignOut={() => session.signOut('manual')}
+      />
+
       {/* Top Navigation */}
       <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur border-b border-slate-800">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">

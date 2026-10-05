@@ -28,18 +28,17 @@ export async function POST(
       return NextResponse.json({ error: 'School tenant not found' }, { status: 404 });
     }
 
-    // Generate an authorized session token for this school tenant
-    const impersonateToken = generateToken(
-      {
-        userId: session.userId,
-        tenantId: tenant.id,
-        email: session.email,
-        fullName: `${session.fullName} (Platform Owner)`,
-        role: 'SUPER_ADMIN',
-        subdomain: tenant.subdomain,
-      },
-      '4h'
-    );
+    // Generate an authorized session token for this school tenant.
+    // No custom lifetime: the impersonated session follows the same
+    // inactivity rules as any other session (see src/lib/session.ts).
+    const impersonateToken = generateToken({
+      userId: session.userId,
+      tenantId: tenant.id,
+      email: session.email,
+      fullName: `${session.fullName} (Platform Owner)`,
+      role: 'SUPER_ADMIN',
+      subdomain: tenant.subdomain,
+    });
 
     return NextResponse.json({
       success: true,
