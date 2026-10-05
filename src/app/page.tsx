@@ -2,6 +2,14 @@
 import React, { useState, useEffect } from "react";
 import HeroBackgroundSlider from "@/components/HeroBackgroundSlider";
 import ThemeToggle from "@/components/ThemeToggle";
+import {
+  clearSession,
+  consumeLogoutReason,
+  evaluateStoredSession,
+  logoutMessage,
+  sanitiseNextPath,
+  storeSession,
+} from "@/lib/session";
 
 export default function Home() {
   const [showRegister, setShowRegister] = useState(false);
@@ -10,14 +18,40 @@ export default function Home() {
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
   const [hasActiveSession, setHasActiveSession] = useState(false);
+  /** Why the previous session ended (inactivity / expiry), shown as a banner. */
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  /** Page the user was trying to reach before being signed out. */
+  const [returnPath, setReturnPath] = useState<string | null>(null);
   const [platformLogo, setPlatformLogo] = useState<string | null>(null);
   const [platformName, setPlatformName] = useState<string>("SMS Global Cloud");
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      if (localStorage.getItem("sms_token")) {
+      // "Go to Dashboard" must only appear for a session that is actually
+      // still usable - not merely a leftover token in localStorage.
+      const evaluation = evaluateStoredSession();
+      if (evaluation.state === "valid") {
         setHasActiveSession(true);
+      } else if (evaluation.state === "invalid") {
+        // Silent clean-up of a dead token; the banner below is only shown when
+        // the user was actually redirected here by the session guard.
+        clearSession();
       }
+
+      // Explain an automatic sign-out: ?session=inactivity|expired|... wins,
+      // otherwise fall back to the reason stashed when the session ended.
+      const params = new URLSearchParams(window.location.search);
+      const reasonFromUrl = params.get("session");
+      const storedReason = consumeLogoutReason();
+      const notice = logoutMessage(reasonFromUrl) ?? logoutMessage(storedReason);
+      if (notice) {
+        setSessionNotice(notice);
+        setShowLogin(true);
+      }
+
+      const next = sanitiseNextPath(params.get("next"));
+      if (next) setReturnPath(next);
+
       try {
         const storedTenant = localStorage.getItem("sms_tenant");
         if (storedTenant) {
@@ -81,8 +115,8 @@ export default function Home() {
       }
       if (!res.ok) throw new Error(data.error || "Registration failed");
       setMsg(`Success! School "${data.tenant.name}" created on subdomain "${data.tenant.subdomain}". Redirecting to dashboard...`);
-      localStorage.setItem("sms_token", data.token);
-      localStorage.setItem("sms_tenant", JSON.stringify(data.tenant));
+      // Starts the session and its inactivity clock.
+      storeSession({ token: data.token, tenant: data.tenant });
       setTimeout(() => {
         window.location.href = "/dashboard";
       }, 700);
@@ -113,11 +147,13 @@ export default function Home() {
       }
       if (!res.ok) throw new Error(data.error || "Login failed");
       setMsg(`Welcome back, ${data.user.fullName}! Redirecting to dashboard...`);
-      localStorage.setItem("sms_token", data.token);
-      localStorage.setItem("sms_tenant", JSON.stringify(data.tenant));
-      localStorage.setItem("sms_user", JSON.stringify(data.user));
+      setSessionNotice(null);
+      // Stores the token and stamps the first activity of the new session.
+      storeSession({ token: data.token, user: data.user, tenant: data.tenant });
+      const fallback = data.user.role === 'SUPER_ADMIN' ? '/admin' : '/dashboard';
+      const destination = returnPath ?? fallback;
       setTimeout(() => {
-        window.location.href = data.user.role === 'SUPER_ADMIN' ? '/admin' : '/dashboard';
+        window.location.href = destination;
       }, 700);
     } catch (err: any) {
       setError(err.message);
@@ -629,6 +665,13 @@ export default function Home() {
 
             <h2 className="text-xl font-bold text-slate-900 mb-1">Sign In to School</h2>
             <p className="text-xs text-slate-500 mb-6">Enter your school credentials to access the portal.</p>
+
+            {sessionNotice && !error && !msg && (
+              <div className="p-3 mb-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium flex items-start gap-2">
+                <span aria-hidden="true">🔒</span>
+                <span>{sessionNotice}</span>
+              </div>
+            )}
 
             {error && <div className="p-3 mb-4 rounded-lg bg-red-50 text-red-700 text-xs font-medium">{error}</div>}
             {msg && <div className="p-3 mb-4 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-medium">{msg}</div>}
